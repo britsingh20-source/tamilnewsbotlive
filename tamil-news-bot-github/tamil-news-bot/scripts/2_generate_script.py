@@ -1,0 +1,137 @@
+"""
+STEP 2: Auto-Write Tamil Script using OpenAI API
+- Reads top topic from topics.json
+- Calls OpenAI API to generate a 60-sec Tamil Reel script
+- Saves script to scripts.json
+"""
+
+import requests
+import json
+import os
+from datetime import datetime
+
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "YOUR_OPENAI_API_KEY_HERE")
+TOPICS_FILE = os.path.join(os.path.dirname(__file__), "../output/topics.json")
+SCRIPTS_FILE = os.path.join(os.path.dirname(__file__), "../output/scripts.json")
+
+def generate_tamil_script(topic_title, topic_description=""):
+    """Generate a Tamil news Reel script using OpenAI API"""
+
+    prompt = f"""You are a Tamil news anchor script writer for Instagram Reels and YouTube Shorts.
+
+Write a viral Tamil news script for this topic: "{topic_title}"
+Additional context: {topic_description}
+
+FORMAT (strictly follow this):
+---
+HOOK (0-5 sec):
+[Write 1 shocking/curious sentence in Tamil to stop the scroll]
+
+STORY (5-45 sec):
+[Write 4-5 sentences explaining the news clearly in Tamil. Use simple words. Be factual.]
+
+TRUTH/FACT (if needed):
+[Any fact-check or clarification in Tamil]
+
+CTA (45-60 sec):
+[Write 2 sentences in Tamil asking to share + follow]
+
+HASHTAGS (in English):
+[Write 15 relevant hashtags]
+
+CAPTION (in Tamil + English):
+[Write Instagram caption 2-3 lines]
+---
+
+Rules:
+- Write ONLY in Tamil script (தமிழ்) for the spoken parts
+- Keep total speaking time under 60 seconds (roughly 120-140 Tamil words)
+- Make it emotional and engaging
+- Use simple conversational Tamil, not formal Tamil
+- Hashtags in English only"""
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {OPENAI_API_KEY}"
+    }
+
+    body = {
+        "model": "gpt-4o",
+        "max_tokens": 1000,
+        "messages": [
+            {"role": "user", "content": prompt}
+        ]
+    }
+
+    try:
+        resp = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers=headers,
+            json=body,
+            timeout=30
+        )
+        data = resp.json()
+        script_text = data["choices"][0]["message"]["content"]
+        return script_text
+    except Exception as e:
+        print(f"OpenAI API error: {e}")
+        return None
+
+def extract_hook(script_text):
+    """Extract just the hook line for video overlay"""
+    lines = script_text.split("\n")
+    for i, line in enumerate(lines):
+        if "HOOK" in line.upper() and i + 1 < len(lines):
+            for j in range(i + 1, min(i + 4, len(lines))):
+                if lines[j].strip() and not lines[j].startswith("["):
+                    return lines[j].strip()
+    return ""
+
+def main():
+    print("✍️  Generating Tamil Scripts using OpenAI GPT-4o...")
+    print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
+
+    # Load topics
+    try:
+        with open(TOPICS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        topics = data["topics"]
+    except FileNotFoundError:
+        print("❌ topics.json not found. Run 1_find_news.py first!")
+        return
+
+    all_scripts = []
+
+    # Generate scripts for top 3 topics
+    for i, topic in enumerate(topics[:3], 1):
+        print(f"📝 Generating script {i}/3: {topic['title'][:50]}...")
+        script = generate_tamil_script(
+            topic["title"],
+            topic.get("description", "")
+        )
+        if script:
+            all_scripts.append({
+                "topic": topic["title"],
+                "script": script,
+                "hook": extract_hook(script),
+                "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M")
+            })
+            print(f"   ✅ Script generated!")
+        else:
+            print(f"   ❌ Failed to generate script")
+
+    # Save all scripts
+    with open(SCRIPTS_FILE, "w", encoding="utf-8") as f:
+        json.dump({"scripts": all_scripts}, f, ensure_ascii=False, indent=2)
+
+    print(f"\n✅ {len(all_scripts)} scripts saved to: {SCRIPTS_FILE}")
+
+    # Print first script preview
+    if all_scripts:
+        print(f"\n--- PREVIEW: First Script ---")
+        print(f"Topic: {all_scripts[0]['topic']}")
+        print(f"Hook: {all_scripts[0]['hook']}")
+        print(f"Script length: {len(all_scripts[0]['script'])} chars")
+
+if __name__ == "__main__":
+    main()
