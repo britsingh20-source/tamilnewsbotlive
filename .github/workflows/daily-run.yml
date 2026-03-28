@@ -8,7 +8,7 @@ on:
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout code
@@ -24,10 +24,10 @@ jobs:
 
       - name: Create output folders
         run: |
-          mkdir -p tamil-news-bot/output/audio
-          mkdir -p tamil-news-bot/output/videos
-          mkdir -p tamil-news-bot/logs
-          mkdir -p tamil-news-bot/assets
+          mkdir -p tamil-news-bot-github_3/tamil-news-bot/output/audio
+          mkdir -p tamil-news-bot-github_3/tamil-news-bot/output/videos
+          mkdir -p tamil-news-bot-github_3/tamil-news-bot/logs
+          mkdir -p tamil-news-bot-github_3/tamil-news-bot/assets
 
       - name: Run Tamil News Bot
         env:
@@ -35,22 +35,22 @@ jobs:
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
           IG_BUSINESS_ID: ${{ secrets.IG_BUSINESS_ID }}
-        run: python tamil-news-bot/scripts/run_all.py
+        run: python tamil-news-bot-github_3/tamil-news-bot/scripts/run_all.py
 
       - name: Show output files
         if: always()
         run: |
-          echo "=== Videos folder ==="
-          find tamil-news-bot/output -type f || echo "No files found"
-          echo "=== Logs folder ==="
-          find tamil-news-bot/logs -type f || echo "No logs found"
+          echo "=== Videos ==="
+          find tamil-news-bot-github_3/tamil-news-bot/output/videos -type f || echo "No videos"
+          echo "=== Audio ==="
+          find tamil-news-bot-github_3/tamil-news-bot/output/audio -type f || echo "No audio"
 
       - name: Upload videos
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: tamil-news-videos-${{ github.run_number }}
-          path: tamil-news-bot/output/
+          path: tamil-news-bot-github_3/tamil-news-bot/output/
           retention-days: 3
 
       - name: Upload logs
@@ -58,5 +58,5 @@ jobs:
         if: always()
         with:
           name: run-logs-${{ github.run_number }}
-          path: tamil-news-bot/logs/
+          path: tamil-news-bot-github_3/tamil-news-bot/logs/
           retention-days: 7
