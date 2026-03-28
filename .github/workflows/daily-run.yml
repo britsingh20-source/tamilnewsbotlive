@@ -37,12 +37,20 @@ jobs:
           IG_BUSINESS_ID: ${{ secrets.IG_BUSINESS_ID }}
         run: python tamil-news-bot/scripts/run_all.py
 
+      - name: Show output files
+        if: always()
+        run: |
+          echo "=== Videos folder ==="
+          find tamil-news-bot/output -type f || echo "No files found"
+          echo "=== Logs folder ==="
+          find tamil-news-bot/logs -type f || echo "No logs found"
+
       - name: Upload videos
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: tamil-news-videos-${{ github.run_number }}
-          path: tamil-news-bot/output/videos/
+          path: tamil-news-bot/output/
           retention-days: 3
 
       - name: Upload logs
