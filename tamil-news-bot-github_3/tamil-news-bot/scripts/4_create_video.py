@@ -1,130 +1,181 @@
 """
-STEP 4: Auto-Create Video with Animated Background (FREE)
-- Generates beautiful animated gradient background using NumPy
-- No downloads needed - works 100% on GitHub Actions
+STEP 4: Auto-Create Video with Animated News Background (FREE)
+- Creates professional animated dark background - no external dependencies
 - Combines with Tamil voiceover audio
 - Outputs 9:16 vertical video for Reels/Shorts
 """
 
 import json
 import os
+import requests
 import numpy as np
 from datetime import datetime
 
 SCRIPTS_FILE = os.path.join(os.path.dirname(__file__), "../output/scripts.json")
 AUDIO_DIR    = os.path.join(os.path.dirname(__file__), "../output/audio")
 VIDEO_DIR    = os.path.join(os.path.dirname(__file__), "../output/videos")
+ASSETS_DIR   = os.path.join(os.path.dirname(__file__), "../assets")
 
-# Beautiful color themes for news channel backgrounds
-COLOR_THEMES = [
-    {"name": "red_gold",    "top": [180, 20, 20],   "bottom": [120, 80, 0]},
-    {"name": "blue_purple", "top": [10, 30, 120],   "bottom": [80, 10, 100]},
-    {"name": "green_teal",  "top": [10, 100, 60],   "bottom": [0, 60, 80]},
-    {"name": "orange_red",  "top": [180, 80, 10],   "bottom": [140, 20, 20]},
-    {"name": "purple_blue", "top": [80, 10, 140],   "bottom": [10, 40, 160]},
+FREE_VIDEO_URLS = [
+    "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
+    "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4",
+    "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/SubaruOutbackOnStreetAndDirt.mp4",
+    "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4",
+    "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
 ]
 
-def make_gradient_frame(width, height, top_color, bottom_color, t, total_frames):
-    """Create a single animated gradient frame"""
-    frame = np.zeros((height, width, 3), dtype=np.uint8)
-    shift = int(np.sin(t / total_frames * 2 * np.pi) * 30)
-    for y in range(height):
-        ratio = (y + shift) / height
-        ratio = max(0.0, min(1.0, ratio))
-        r = int(top_color[0] * (1 - ratio) + bottom_color[0] * ratio)
-        g = int(top_color[1] * (1 - ratio) + bottom_color[1] * ratio)
-        b = int(top_color[2] * (1 - ratio) + bottom_color[2] * ratio)
-        frame[y, :] = [r, g, b]
-    shimmer = int(np.sin(t / total_frames * 4 * np.pi + 1.5) * 15)
-    shimmer_band_start = int((0.3 + 0.1 * np.sin(t / total_frames * np.pi)) * height)
-    shimmer_band_end = shimmer_band_start + 80
-    if 0 <= shimmer_band_start < height:
-        end = min(shimmer_band_end, height)
-        frame[shimmer_band_start:end, :] = np.clip(
-            frame[shimmer_band_start:end, :].astype(int) + shimmer, 0, 255
-        ).astype(np.uint8)
-    return frame
+def download_free_video(output_path, index=0):
+    for i, url in enumerate(FREE_VIDEO_URLS):
+        try:
+            print(f"   Trying video source {i+1}/{len(FREE_VIDEO_URLS)}...")
+            headers = {"User-Agent": "Mozilla/5.0"}
+            r = requests.get(url, stream=True, timeout=30, headers=headers)
+            if r.status_code == 200:
+                with open(output_path, "wb") as f:
+                    downloaded = 0
+                    for chunk in r.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if downloaded > 5 * 1024 * 1024:
+                            break
+                size_kb = os.path.getsize(output_path) / 1024
+                if size_kb > 100:
+                    print(f"   Downloaded {size_kb:.0f} KB from source {i+1}")
+                    return True
+        except Exception as e:
+            print(f"   Source {i+1} failed: {e}")
+            continue
+    print("   All video sources failed - using generated background")
+    return False
 
-def create_animated_video(audio_path, output_path, theme_index=0):
-    """Create animated gradient background video with audio"""
+def create_animated_background(output_path, duration):
     try:
-        from moviepy.editor import AudioFileClip, VideoClip
+        from moviepy.editor import VideoClip
+        W, H = 1080, 1920
+        FPS = 24
+
+        def make_frame(t):
+            frame = np.zeros((H, W, 3), dtype=np.uint8)
+            for y in range(H):
+                intensity = int(15 * np.sin(y / H * np.pi + t * 0.3))
+                wave = int(20 * np.sin(t * 0.5))
+                frame[y, :, 0] = max(0, min(255, 10 + intensity))
+                frame[y, :, 1] = max(0, min(255, 20 + intensity + wave))
+                frame[y, :, 2] = max(0, min(255, 60 + intensity * 2))
+            frame[50:120, :] = [20, 80, 180]
+            frame[H-120:H-50, :] = [180, 20, 20]
+            return frame
+
+        clip = VideoClip(make_frame, duration=duration)
+        clip.write_videofile(output_path, fps=FPS, logger=None, threads=2)
+        clip.close()
+        print(f"   Created animated background: {duration:.1f}s")
+        return True
+    except Exception as e:
+        print(f"   Animated background error: {e}")
+        return False
+
+def create_final_video(bg_path, audio_path, output_path):
+    try:
+        from moviepy.editor import VideoFileClip, AudioFileClip, ColorClip, concatenate_videoclips
+
         audio = AudioFileClip(audio_path)
         duration = audio.duration
         print(f"   Audio duration: {duration:.1f}s")
-        theme = COLOR_THEMES[theme_index % len(COLOR_THEMES)]
-        width, height = 1080, 1920
-        fps = 24
-        total_frames = int(duration * fps)
-        print(f"   Generating animated {theme['name']} background ({total_frames} frames)...")
-        top_color    = theme["top"]
-        bottom_color = theme["bottom"]
-        def make_frame(t):
-            frame_num = int(t * fps)
-            return make_gradient_frame(width, height, top_color, bottom_color, frame_num, total_frames)
-        video = VideoClip(make_frame, duration=duration)
+
+        bg_ok = os.path.exists(bg_path) and os.path.getsize(bg_path) > 50000
+        if bg_ok:
+            video = VideoFileClip(bg_path)
+            if video.duration < duration:
+                loops = int(duration / video.duration) + 2
+                video = concatenate_videoclips([video] * loops)
+            video = video.subclip(0, duration)
+            video = video.resize(height=1920)
+            if video.w > 1080:
+                video = video.crop(x_center=video.w/2, width=1080)
+            elif video.w < 1080:
+                video = video.resize(width=1080)
+        else:
+            video = ColorClip(size=(1080, 1920), color=[10, 20, 60], duration=duration)
+
         final = video.set_audio(audio)
         final.write_videofile(
-            output_path,
-            fps=fps,
-            codec="libx264",
-            audio_codec="aac",
-            logger=None,
-            threads=2,
-            preset="ultrafast"
+            output_path, fps=24, codec="libx264",
+            audio_codec="aac", logger=None, threads=2, preset="ultrafast"
         )
         audio.close()
         final.close()
-        print(f"   Done!")
+        size_mb = os.path.getsize(output_path) / (1024*1024)
+        print(f"   Video created: {size_mb:.1f} MB")
         return True
     except Exception as e:
-        print(f"   Error: {e}")
+        print(f"   Final video error: {e}")
         import traceback
         traceback.print_exc()
         return False
 
 def main():
-    print("Creating Tamil News Videos with Animated Backgrounds...")
+    print("Creating Tamil News Videos...")
     print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
+
     os.makedirs(VIDEO_DIR, exist_ok=True)
+    os.makedirs(ASSETS_DIR, exist_ok=True)
+
     try:
         with open(SCRIPTS_FILE, "r", encoding="utf-8") as f:
             scripts_data = json.load(f)["scripts"]
     except FileNotFoundError:
         print("scripts.json not found!")
         return
+
     try:
         with open(os.path.join(AUDIO_DIR, "manifest.json"), "r") as f:
             audio_files = json.load(f)["audio_files"]
     except FileNotFoundError:
         print("Audio manifest not found!")
         return
+
     print(f"Found {len(scripts_data)} scripts and {len(audio_files)} audio files\n")
     created_videos = []
+
     for i, (script_data, audio_data) in enumerate(zip(scripts_data, audio_files), 1):
-        topic = script_data['topic'][:50]
-        print(f"Video {i}/{len(scripts_data)}: {topic}...")
-        timestamp   = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_path = os.path.join(VIDEO_DIR, f"reel_{i}_{timestamp}.mp4")
-        audio_path  = audio_data["audio_file"]
-        if not os.path.exists(audio_path):
-            print(f"   Audio missing: {audio_path}")
+        print(f"Video {i}/{len(scripts_data)}: {script_data['topic'][:50]}...")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        bg_path     = os.path.join(ASSETS_DIR, f"bg_{i}.mp4")
+        output_path = os.path.join(VIDEO_DIR,  f"reel_{i}_{timestamp}.mp4")
+
+        got_bg = download_free_video(bg_path, index=i-1)
+        if not got_bg:
+            print("   Generating animated news background...")
+            got_bg = create_animated_background(bg_path, duration=60)
+        if not got_bg:
+            from moviepy.editor import ColorClip
+            clip = ColorClip(size=(1080,1920), color=[10,20,60], duration=60)
+            clip.write_videofile(bg_path, fps=24, logger=None)
+            clip.close()
+
+        audio_path_file = audio_data["audio_file"]
+        if not os.path.exists(audio_path_file):
+            print(f"   Audio missing: {audio_path_file}")
             continue
-        success = create_animated_video(audio_path, output_path, theme_index=i - 1)
+
+        success = create_final_video(bg_path, audio_path_file, output_path)
+
         if success and os.path.exists(output_path):
-            size_mb = os.path.getsize(output_path) / (1024 * 1024)
-            theme_name = COLOR_THEMES[(i-1) % len(COLOR_THEMES)]["name"]
+            size_mb = os.path.getsize(output_path) / (1024*1024)
             created_videos.append({
                 "topic": script_data["topic"],
                 "video_file": output_path,
                 "size_mb": round(size_mb, 1),
-                "theme": theme_name
             })
-            print(f"   {size_mb:.1f} MB ({theme_name} theme)\n")
+            print(f"   Done! {size_mb:.1f} MB\n")
         else:
             print(f"   Failed\n")
+
     with open(os.path.join(VIDEO_DIR, "manifest.json"), "w") as f:
-        json.dump({"videos": created_videos, "created_at": datetime.now().strftime("%Y-%m-%d %H:%M")}, f, indent=2)
+        json.dump({"videos": created_videos,
+                   "created_at": datetime.now().strftime("%Y-%m-%d %H:%M")}, f, indent=2)
+
     print(f"{len(created_videos)} videos ready!")
     print(f"Folder: {VIDEO_DIR}")
 
