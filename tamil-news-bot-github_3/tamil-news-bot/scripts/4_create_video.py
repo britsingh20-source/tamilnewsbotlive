@@ -1,15 +1,17 @@
 """
-STEP 4: Tamil News Video Creator (v3)
-- Downloads relevant video from Pexels using PEXELS_API_KEY
-- Falls back to relevant photo if no video found
-- Falls back to gradient background as last resort
+STEP 4: Tamil News Video Creator (v4)
+- Tries Pexels video -> Pixabay video -> Pexels photo -> Pixabay photo -> gradient
+- Pixabay is 100% FREE (get key at https://pixabay.com/api/docs/)
 - Tamil captions rendered with Noto Tamil font
 - Footer advertisement: Coimbatore Veedu Builders | 8111024877
+- v4: Added Pixabay, bulletproof fallback, verbose ffmpeg logging
 """
 
 import json
 import os
 import io
+import sys
+import subprocess
 import requests
 import numpy as np
 from datetime import datetime
@@ -23,291 +25,570 @@ ASSETS_DIR   = os.path.join(os.path.dirname(__file__), "../assets")
 W, H   = 1080, 1920
 FPS    = 24
 
+# Advertisement config
 AD_LINE1    = "Coimbatore Veedu Builders"
 AD_LINE2    = "Contact: 8111024877"
 CHANNEL     = "Tamil News Live"
-PEXELS_KEY  = os.environ.get("PEXELS_API_KEY", "")
+
+# API keys
+PEXELS_KEY   = os.environ.get("PEXELS_API_KEY", "")
+PIXABAY_KEY  = os.environ.get("PIXABAY_API_KEY", "")
 
 
 def get_topic_keywords(topic):
-    ascii_words = [w for w in topic.split() if all(ord(c) < 128 for c in w)]
-    return " ".join(ascii_words[:4]) if ascii_words else "news breaking india"
+    """Extract short English-safe keywords from topic for API search."""
+    ascii_words = [w for w in topic.split() if all(ord(c) < 128 for c in w) and len(w) > 2]
+    if ascii_words:
+        return " ".join(ascii_words[:4])
+    return "news breaking india city"
 
 
 def download_pexels_video(keywords, out_path):
     if not PEXELS_KEY:
-        print("  No PEXELS_API_KEY, skipping"); return False
+        print("  [Pexels] No PEXELS_API_KEY set, skipping")
+        return False
     try:
         headers = {"Authorization": PEXELS_KEY}
-        videos = []
-        for query in [keywords, "news television broadcast"]:
-            r = requests.get("https://api.pexels.com/videos/search", headers=headers,
-                             params={"query": query, "per_page": 5, "orientation": "portrait"}, timeout=15)
-            if r.status_code == 200:
-                videos = r.json().get("videos", [])
-                if videos: break
-        if not videos: return False
-        files = videos[0].get("video_files", [])
-        portrait = [f for f in files if f.get("width", 0) < f.get("height", 0)]
-        cands = sorted(portrait or files, key=lambda f: f.get("width", 0))
-        url = cands[0].get("link", "")
-        if not url: return False
-        print(f"  Downloading Pexels video...")
-        resp = requests.get(url, stream=True, timeout=60)
-        if resp.status_code != 200: return False
-        downloaded = 0
-        with open(out_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=65536):
-                f.write(chunk); downloaded += len(chunk)
-                if downloaded > 30 * 1024 * 1024: break
-        return os.path.getsize(out_path) > 100000
+        for query in [keywords, "news television broadcast india"]:
+            params = {"query": query, "per_page": 5, "orientation": "portrait"}
+            r = requests.get("https://api.pexels.com/videos/search",
+                             headers=headers, params=params, timeout=15)
+            print(f"  [Pexels video] query='{query}' status={r.status_code}")
+            if r.status_code != 200:
+                continue
+            videos = r.json().get("videos", [])
+            if not videos:
+                continue
+            video = videos[0]
+            files = video.get("video_files", [])
+            portrait = [f for f in files if f.get("width", 0) < f.get("height", 0)]
+            candidates = portrait if portrait else files
+            candidates = sorted(candidates, key=lambda f: f.get("width", 9999))
+            if not candidates:
+                continue
+            chosen = candidates[0]
+            url = chosen.get("link", "")
+            if not url:
+                continue
+            print(f"  [Pexels video] Downloading {chosen.get('width')}x{chosen.get('height')} ...")
+            resp = requests.get(url, stream=True, timeout=90)
+            if resp.status_code != 200:
+                continue
+            downloaded = 0
+            with open(out_path, "wb") as f:
+                for chunk in resp.iter_content(65536):
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if downloaded > 30 * 1024 * 1024:
+                        break
+            sz = os.path.getsize(out_path)
+            print(f"  [Pexels video] Got {sz/1024/1024:.1f} MB")
+            return sz > 100_000
     except Exception as e:
-        print(f"  Pexels video error: {e}"); return False
+        print(f"  [Pexels video] Error: {e}")
+    return False
 
 
 def download_pexels_photo(keywords, out_path):
-    if not PEXELS_KEY: return False
+    if not PEXELS_KEY:
+        return False
     try:
         headers = {"Authorization": PEXELS_KEY}
-        r = requests.get("https://api.pexels.com/v1/search", headers=headers,
-                         params={"query": keywords, "per_page": 3, "orientation": "portrait"}, timeout=15)
-        if r.status_code != 200: return False
-        photos = r.json().get("photos", [])
-        if not photos: return False
-        img_url = photos[0]["src"].get("portrait") or photos[0]["src"]["large"]
-        resp = requests.get(img_url, timeout=30)
-        if resp.status_code != 200: return False
-        img = Image.open(io.BytesIO(resp.content)).convert("RGB").resize((W, H), Image.LANCZOS)
-        img.save(out_path)
-        print("  Downloaded Pexels photo background"); return True
+        for query in [keywords, "india news city"]:
+            params = {"query": query, "per_page": 3, "orientation": "portrait"}
+            r = requests.get("https://api.pexels.com/v1/search",
+                             headers=headers, params=params, timeout=15)
+            print(f"  [Pexels photo] query='{query}' status={r.status_code}")
+            if r.status_code != 200:
+                continue
+            photos = r.json().get("photos", [])
+            if not photos:
+                continue
+            img_url = photos[0]["src"].get("portrait") or photos[0]["src"].get("large", "")
+            if not img_url:
+                continue
+            resp = requests.get(img_url, timeout=30)
+            if resp.status_code != 200:
+                continue
+            img = Image.open(io.BytesIO(resp.content)).convert("RGB").resize((W, H), Image.LANCZOS)
+            img.save(out_path)
+            print(f"  [Pexels photo] Saved background photo")
+            return True
     except Exception as e:
-        print(f"  Pexels photo error: {e}"); return False
+        print(f"  [Pexels photo] Error: {e}")
+    return False
+
+
+def download_pixabay_video(keywords, out_path):
+    if not PIXABAY_KEY:
+        print("  [Pixabay] No PIXABAY_API_KEY set -- get free key at pixabay.com/api/docs/")
+        return False
+    try:
+        for query in [keywords, "india news city people"]:
+            params = {
+                "key": PIXABAY_KEY,
+                "q": query,
+                "video_type": "film",
+                "per_page": 5,
+                "safesearch": "true",
+            }
+            r = requests.get("https://pixabay.com/api/videos/", params=params, timeout=15)
+            print(f"  [Pixabay video] query='{query}' status={r.status_code}")
+            if r.status_code != 200:
+                continue
+            hits = r.json().get("hits", [])
+            if not hits:
+                continue
+            videos_info = hits[0].get("videos", {})
+            chosen_url = (
+                videos_info.get("medium", {}).get("url")
+                or videos_info.get("small", {}).get("url")
+                or videos_info.get("large", {}).get("url")
+            )
+            if not chosen_url:
+                continue
+            print(f"  [Pixabay video] Downloading ...")
+            resp = requests.get(chosen_url, stream=True, timeout=90)
+            if resp.status_code != 200:
+                continue
+            downloaded = 0
+            with open(out_path, "wb") as f:
+                for chunk in resp.iter_content(65536):
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if downloaded > 30 * 1024 * 1024:
+                        break
+            sz = os.path.getsize(out_path)
+            print(f"  [Pixabay video] Got {sz/1024/1024:.1f} MB")
+            return sz > 100_000
+    except Exception as e:
+        print(f"  [Pixabay video] Error: {e}")
+    return False
+
+
+def download_pixabay_photo(keywords, out_path):
+    if not PIXABAY_KEY:
+        return False
+    try:
+        for query in [keywords, "india city news"]:
+            params = {
+                "key": PIXABAY_KEY,
+                "q": query,
+                "image_type": "photo",
+                "per_page": 5,
+                "safesearch": "true",
+                "orientation": "vertical",
+            }
+            r = requests.get("https://pixabay.com/api/", params=params, timeout=15)
+            print(f"  [Pixabay photo] query='{query}' status={r.status_code}")
+            if r.status_code != 200:
+                continue
+            hits = r.json().get("hits", [])
+            if not hits:
+                continue
+            img_url = hits[0].get("largeImageURL") or hits[0].get("webformatURL", "")
+            if not img_url:
+                continue
+            resp = requests.get(img_url, timeout=30)
+            if resp.status_code != 200:
+                continue
+            img = Image.open(io.BytesIO(resp.content)).convert("RGB").resize((W, H), Image.LANCZOS)
+            img.save(out_path)
+            print(f"  [Pixabay photo] Saved background photo")
+            return True
+    except Exception as e:
+        print(f"  [Pixabay photo] Error: {e}")
+    return False
 
 
 def load_font(size, tamil=False):
-    paths = ([
-        "/usr/share/fonts/truetype/noto/NotoSansTamil-Regular.ttf",
-        "/usr/share/fonts/opentype/noto/NotoSansTamil-Regular.otf",
-        "/usr/share/fonts/truetype/lohit-tamil/Lohit-Tamil.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    ] if tamil else [
-        "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-    ])
-    for p in paths:
-        if os.path.exists(p):
+    candidates = []
+    if tamil:
+        candidates = [
+            "/usr/share/fonts/truetype/noto/NotoSansTamil-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSansTamil[wdth,wght].ttf",
+            "/usr/share/fonts/opentype/noto/NotoSansTamil-Regular.otf",
+            "/usr/share/fonts/truetype/lohit-tamil/Lohit-Tamil.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        ]
+    else:
+        candidates = [
+            "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+            "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+        ]
+    for path in candidates:
+        if os.path.exists(path):
             try:
-                font = ImageFont.truetype(p, size)
-                print(f"  Font OK: {os.path.basename(p)} sz={size}"); return font
-            except Exception: continue
-    print(f"  WARNING: default font sz={size}"); return ImageFont.load_default()
+                font = ImageFont.truetype(path, size)
+                tmp  = Image.new("RGB", (10, 10))
+                ImageDraw.Draw(tmp).text((0, 0), "A", font=font)
+                print(f"  Font: {os.path.basename(path)} size={size}")
+                return font
+            except Exception:
+                continue
+    print(f"  WARNING: default font (size={size})")
+    return ImageFont.load_default()
 
 
-def twidth(draw, text, font):
+def text_w(draw, text, font):
     try:
-        b = draw.textbbox((0, 0), text, font=font); return b[2] - b[0]
-    except Exception: return len(text) * max(8, getattr(font, 'size', 10) // 2)
+        b = draw.textbbox((0, 0), text, font=font)
+        return b[2] - b[0]
+    except Exception:
+        return len(text) * max(getattr(font, "size", 12), 8)
 
 
-def theight(draw, text, font):
+def text_h(draw, text, font):
     try:
-        b = draw.textbbox((0, 0), text, font=font); return b[3] - b[1]
-    except Exception: return max(12, getattr(font, 'size', 12) + 4)
+        b = draw.textbbox((0, 0), text, font=font)
+        return b[3] - b[1]
+    except Exception:
+        return max(getattr(font, "size", 12), 8) + 4
 
 
-def wrap(draw, text, font, max_w):
-    if not text.strip(): return []
-    words = text.split(); lines, cur = [], ""
-    for w in words:
-        test = (cur + " " + w).strip()
-        if twidth(draw, test, font) <= max_w: cur = test
+def wrap_text(draw, text, font, max_w):
+    if not text.strip():
+        return []
+    words, lines, cur = text.split(), [], ""
+    for word in words:
+        test = (cur + " " + word).strip()
+        if text_w(draw, test, font) <= max_w:
+            cur = test
         else:
-            if cur: lines.append(cur)
-            cur = w
-    if cur: lines.append(cur)
-    return lines or [text[:40]]
+            if cur:
+                lines.append(cur)
+            cur = word
+    if cur:
+        lines.append(cur)
+    return lines or [text]
 
 
-def shadow(draw, xy, text, font, fill=(255,255,255), shd=(0,0,0), off=2):
+def shadow_text(draw, xy, text, font, fill=(255, 255, 255), shadow=(0, 0, 0), off=2):
     x, y = xy
-    for dx in (-off, 0, off):
-        for dy in (-off, 0, off):
-            if dx or dy: draw.text((x+dx, y+dy), text, font=font, fill=shd)
+    for dx in [-off, 0, off]:
+        for dy in [-off, 0, off]:
+            if dx or dy:
+                draw.text((x + dx, y + dy), text, font=font, fill=shadow)
     draw.text((x, y), text, font=font, fill=fill)
 
 
-def center_shadow(draw, text, font, y, fill=(255,255,255)):
-    w = twidth(draw, text, font); x = max(20, (W - w) // 2)
-    shadow(draw, (x, y), text, font, fill=fill)
+def center_shadow(draw, text, font, y, fill=(255, 255, 255)):
+    tw = text_w(draw, text, font)
+    x  = max(20, (W - tw) // 2)
+    shadow_text(draw, (x, y), text, font, fill=fill)
 
 
-def make_gradient(t):
-    p = int(8 * np.sin(t * 0.7))
-    arr = np.zeros((H, W, 3), dtype=np.uint8)
-    ratio = np.arange(H, dtype=np.float32) / H
-    arr[:, :, 0] = np.clip(10 + (ratio * 20).astype(int) + p, 0, 255)[:, None]
-    arr[:, :, 1] = np.clip(10 + (ratio * 15).astype(int), 0, 255)[:, None]
-    arr[:, :, 2] = np.clip(50 + (ratio * 80).astype(int) + p*2, 0, 255)[:, None]
-    return arr
+def make_gradient_frame(t):
+    """Animated dark-blue gradient -- always works, no API needed."""
+    try:
+        pulse = int(8 * np.sin(t * 0.7))
+        arr   = np.zeros((H, W, 3), dtype=np.uint8)
+        ys    = np.arange(H, dtype=np.float32) / H
+        arr[:, :, 0] = np.clip(10 + (ys * 20).astype(int) + pulse, 0, 255)[:, None]
+        arr[:, :, 1] = np.clip(10 + (ys * 15).astype(int),         0, 255)[:, None]
+        arr[:, :, 2] = np.clip(50 + (ys * 80).astype(int) + pulse * 2, 0, 255)[:, None]
+        return arr
+    except Exception:
+        arr = np.zeros((H, W, 3), dtype=np.uint8)
+        arr[:, :, 2] = 80
+        return arr
 
 
-def compose(bg_arr, topic, caption, font_ch, font_topic, font_cap, font_ad, font_ad2):
-    img = Image.fromarray(bg_arr.astype(np.uint8)).convert("RGBA")
-    ov = Image.new("RGBA", (W, H), (0, 0, 0, 100))
-    img = Image.alpha_composite(img, ov).convert("RGB")
-    draw = ImageDraw.Draw(img)
+def compose_frame(bg_frame, topic, caption_text,
+                  font_ch, font_topic, font_cap, font_ad, font_ad2):
+    try:
+        img = Image.fromarray(bg_frame.astype(np.uint8), "RGB")
+        overlay = Image.new("RGBA", (W, H), (0, 0, 0, 110))
+        img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+        draw = ImageDraw.Draw(img)
 
-    draw.rectangle([0, 0, W, 130], fill=(10, 20, 80))
-    draw.rectangle([0, 128, W, 138], fill=(220, 30, 30))
-    shadow(draw, (30, 15), CHANNEL, font_ch)
-    shadow(draw, (30, 78), "BREAKING NEWS", font_ad2, fill=(255, 80, 80))
+        draw.rectangle([0, 0, W, 130], fill=(10, 20, 80))
+        draw.rectangle([0, 128, W, 138], fill=(220, 30, 30))
+        shadow_text(draw, (30, 15),  CHANNEL,         font_ch,  fill=(255, 255, 255))
+        shadow_text(draw, (30, 82),  "BREAKING NEWS", font_ad2, fill=(255, 80, 80))
 
-    draw.rectangle([0, 138, W, 265], fill=(0, 0, 0, 170))
-    ty = 148
-    for line in wrap(draw, topic[:80], font_topic, W-60)[:2]:
-        shadow(draw, (30, ty), line, font_topic, fill=(255, 215, 0)); ty += 56
+        draw.rectangle([0, 138, W, 270], fill=(0, 0, 0, 170))
+        ty = 148
+        for line in wrap_text(draw, topic[:80], font_topic, W - 60)[:2]:
+            shadow_text(draw, (30, ty), line, font_topic, fill=(255, 215, 0))
+            ty += 58
 
-    if caption.strip():
-        cap_lines = wrap(draw, caption, font_cap, W-80)[:5]
-        lh = theight(draw, "A", font_cap) + 18
-        total = len(cap_lines) * lh
-        cy = max(350, (H - total)//2 + 40)
-        draw.rectangle([25, cy-18, W-25, cy+total+18], fill=(0, 0, 0, 150))
-        for line in cap_lines:
-            center_shadow(draw, line, font_cap, cy); cy += lh
+        if caption_text.strip():
+            cap_lines = wrap_text(draw, caption_text, font_cap, W - 80)[:5]
+            lh        = text_h(draw, "A", font_cap) + 18
+            total_h   = len(cap_lines) * lh
+            cy        = (H - total_h) // 2 + 60
+            pad       = 22
+            draw.rectangle([30, cy - pad, W - 30, cy + total_h + pad], fill=(0, 0, 0, 160))
+            for line in cap_lines:
+                center_shadow(draw, line, font_cap, cy, fill=(255, 255, 255))
+                cy += lh
 
-    ft = H - 165
-    draw.rectangle([0, ft, W, H], fill=(180, 10, 10))
-    draw.rectangle([0, ft, W, ft+5], fill=(255, 215, 0))
-    center_shadow(draw, AD_LINE1, font_ad, ft+18, fill=(255, 255, 255))
-    center_shadow(draw, AD_LINE2, font_ad2, ft+85, fill=(255, 230, 0))
+        ft = H - 160
+        draw.rectangle([0, ft, W, H],        fill=(180, 10, 10))
+        draw.rectangle([0, ft, W, ft + 4],   fill=(255, 215, 0))
+        center_shadow(draw, AD_LINE1, font_ad,  ft + 20,  fill=(255, 255, 255))
+        center_shadow(draw, AD_LINE2, font_ad2, ft + 88,  fill=(255, 230, 0))
 
-    return np.array(img)
+        return np.array(img)
+    except Exception as e:
+        print(f"  [compose] frame error: {e}")
+        return bg_frame.astype(np.uint8)
 
 
-def extract_spoken(script_text):
-    lines, parts, in_skip = script_text.split("\n"), [], False
+def extract_spoken_text(script_text):
+    lines, spoken, skip = script_text.split("\n"), [], False
     skip_kw = ["HASHTAGS", "CAPTION", "FORMAT", "RULES"]
     for line in lines:
         line = line.strip()
-        if not line: continue
-        if any(k in line.upper() for k in skip_kw): in_skip = True; continue
-        if line.startswith(("HOOK","STORY","CTA","TRUTH")): in_skip = False; continue
-        if in_skip or line.startswith(("[","---","#")): continue
-        if line and not line.isupper(): parts.append(line)
-    return " ".join(parts)
+        if not line:
+            continue
+        if any(k in line.upper() for k in skip_kw):
+            skip = True; continue
+        if line.startswith(("HOOK", "STORY", "CTA", "TRUTH")):
+            skip = False; continue
+        if skip or line.startswith(("[", "---", "#")):
+            continue
+        if not line.isupper():
+            spoken.append(line)
+    return " ".join(spoken)
 
 
-def make_segments(text, n):
+def split_into_segments(text, n):
     words = text.split()
-    if not words: return [""] * n
-    c = max(1, len(words)//n); segs = []
+    if not words:
+        return [""] * n
+    chunk = max(1, len(words) // n)
+    segs  = []
     for i in range(n):
-        s, e = i*c, (i*c+c if i < n-1 else len(words))
+        s = i * chunk
+        e = s + chunk if i < n - 1 else len(words)
         segs.append(" ".join(words[s:e]))
     return segs
 
 
-def create_video(audio_path, spoken, topic, out_path, bg_vid=None, bg_photo=None):
+def check_ffmpeg():
+    try:
+        result = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True, timeout=10)
+        print(f"  ffmpeg: {result.stdout.splitlines()[0] if result.stdout else 'found'}")
+        return True
+    except Exception as e:
+        print(f"  WARNING: ffmpeg check failed: {e}")
+        return False
+
+
+def create_news_video(audio_path, spoken_text, topic, output_path,
+                      bg_video_path=None, bg_photo_path=None):
     from moviepy.editor import VideoClip, AudioFileClip, VideoFileClip, concatenate_videoclips
-    audio = AudioFileClip(audio_path)
-    dur = audio.duration
-    print(f"  Duration: {dur:.1f}s")
-    n = max(1, int(dur/4))
-    segs = make_segments(spoken, n)
-    seg_d = dur / n
-    font_ch    = load_font(50)
-    font_topic = load_font(42)
-    font_cap   = load_font(54, tamil=True)
-    font_ad    = load_font(50)
-    font_ad2   = load_font(36)
-    vc = None
-    if bg_vid and os.path.exists(bg_vid):
+
+    print(f"  Loading audio: {audio_path}")
+    audio    = AudioFileClip(audio_path)
+    duration = audio.duration
+    print(f"  Duration: {duration:.1f}s")
+
+    num_segs = max(1, int(duration / 4))
+    segments = split_into_segments(spoken_text or topic, num_segs)
+    seg_dur  = duration / num_segs
+
+    print("  Loading fonts ...")
+    font_ch    = load_font(52)
+    font_topic = load_font(44)
+    font_cap   = load_font(56, tamil=True)
+    font_ad    = load_font(52)
+    font_ad2   = load_font(38)
+
+    bg_clip = None
+    if bg_video_path and os.path.exists(bg_video_path):
         try:
-            raw = VideoFileClip(bg_vid)
-            if raw.duration < dur:
-                loops = int(dur/raw.duration) + 2
-                raw = concatenate_videoclips([raw]*loops)
-            raw = raw.subclip(0, dur).resize(height=H)
-            if raw.w > W: raw = raw.crop(x_center=raw.w/2, width=W)
-            elif raw.w < W: raw = raw.resize(width=W)
-            vc = raw; print("  BG: Pexels video")
+            raw = VideoFileClip(bg_video_path)
+            print(f"  BG video: {raw.w}x{raw.h} {raw.duration:.1f}s")
+            if raw.duration < duration:
+                loops = int(duration / raw.duration) + 2
+                raw   = concatenate_videoclips([raw] * loops)
+            raw = raw.subclip(0, duration)
+            if raw.h < H:
+                raw = raw.resize(height=H)
+            if raw.w < W:
+                raw = raw.resize(width=W)
+            if raw.w > W:
+                raw = raw.crop(x_center=raw.w / 2, width=W)
+            if raw.h > H:
+                raw = raw.crop(y_center=raw.h / 2, height=H)
+            bg_clip = raw
+            print(f"  BG video ready: {bg_clip.w}x{bg_clip.h}")
         except Exception as e:
-            print(f"  BG video err: {e}")
-    static_bg = None
-    if vc is None and bg_photo and os.path.exists(bg_photo):
+            print(f"  BG video failed: {e}")
+            bg_clip = None
+
+    bg_photo = None
+    if bg_clip is None and bg_photo_path and os.path.exists(bg_photo_path):
         try:
-            static_bg = np.array(Image.open(bg_photo).convert("RGB").resize((W,H),Image.LANCZOS))
-            print("  BG: Pexels photo")
+            img      = Image.open(bg_photo_path).convert("RGB").resize((W, H), Image.LANCZOS)
+            bg_photo = np.array(img)
+            print("  BG photo ready")
         except Exception as e:
-            print(f"  BG photo err: {e}")
+            print(f"  BG photo failed: {e}")
+
+    if bg_clip is None and bg_photo is None:
+        print("  Using animated gradient background (no external API needed)")
 
     def make_frame(t):
-        if vc is not None:
-            frame = vc.get_frame(t)
-            if frame.shape[:2] != (H, W):
-                frame = np.array(Image.fromarray(frame).resize((W,H),Image.LANCZOS))
-        elif static_bg is not None:
-            frame = static_bg.copy()
-        else:
-            frame = make_gradient(t)
-        idx = min(int(t/seg_d), n-1)
-        return compose(frame, topic, segs[idx], font_ch, font_topic, font_cap, font_ad, font_ad2)
+        try:
+            if bg_clip is not None:
+                raw = bg_clip.get_frame(t)
+                if raw.shape[:2] != (H, W):
+                    raw = np.array(Image.fromarray(raw).resize((W, H), Image.LANCZOS))
+            elif bg_photo is not None:
+                raw = bg_photo.copy()
+            else:
+                raw = make_gradient_frame(t)
+        except Exception as e:
+            print(f"  make_frame bg error at t={t:.2f}: {e}")
+            raw = make_gradient_frame(t)
 
-    clip = VideoClip(make_frame, duration=dur)
+        seg_idx = min(int(t / seg_dur), num_segs - 1)
+        return compose_frame(raw, topic, segments[seg_idx],
+                             font_ch, font_topic, font_cap, font_ad, font_ad2)
+
+    print("  Building VideoClip ...")
+    clip  = VideoClip(make_frame, duration=duration)
     final = clip.set_audio(audio)
-    final.write_videofile(out_path, fps=FPS, codec="libx264",
-                          audio_codec="aac", logger=None, threads=2, preset="ultrafast")
-    audio.close(); final.close()
-    if vc: vc.close()
-    mb = os.path.getsize(out_path)/(1024*1024)
-    print(f"  Done: {mb:.1f} MB"); return True
+
+    print(f"  Writing -> {output_path}")
+    final.write_videofile(
+        output_path,
+        fps=FPS,
+        codec="libx264",
+        audio_codec="aac",
+        logger="bar",
+        threads=2,
+        preset="ultrafast",
+    )
+    audio.close()
+    final.close()
+    if bg_clip:
+        bg_clip.close()
+
+    if os.path.exists(output_path):
+        sz = os.path.getsize(output_path) / (1024 * 1024)
+        print(f"  Video written: {sz:.1f} MB")
+        return True
+    else:
+        print("  ERROR: Output file not found after write!")
+        return False
 
 
 def main():
-    print("Tamil News Video v3 - Pexels BG + Tamil captions + Ad footer")
-    print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
-    os.makedirs(VIDEO_DIR, exist_ok=True)
+    print("Tamil News Video Creator v4 (Pexels + Pixabay BG + Gradient fallback)")
+    print(f"Time : {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"PEXELS_API_KEY  : {'SET' if PEXELS_KEY  else 'NOT SET'}")
+    print(f"PIXABAY_API_KEY : {'SET' if PIXABAY_KEY else 'NOT SET -- gradient will be used'}")
+
+    check_ffmpeg()
+    os.makedirs(VIDEO_DIR,  exist_ok=True)
     os.makedirs(ASSETS_DIR, exist_ok=True)
-    with open(SCRIPTS_FILE, "r", encoding="utf-8") as f:
-        scripts = json.load(f)["scripts"]
-    with open(os.path.join(AUDIO_DIR, "manifest.json"), "r") as f:
-        audios = json.load(f)["audio_files"]
-    print(f"Scripts: {len(scripts)} | Audio: {len(audios)}\n")
-    created = []
-    for i, (sd, ad) in enumerate(zip(scripts, audios), 1):
-        topic = sd["topic"]
-        print(f"\nVideo {i}: {topic[:55]}...")
-        apath = ad["audio_file"]
-        if not os.path.exists(apath):
-            print(f"  Missing audio: {apath}"); continue
-        spoken = extract_spoken(sd["script"]) or sd["script"][:500]
-        kw = get_topic_keywords(topic)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        vid_bg   = os.path.join(ASSETS_DIR, f"bg_vid_{i}.mp4")
-        photo_bg = os.path.join(ASSETS_DIR, f"bg_photo_{i}.jpg")
-        out = os.path.join(VIDEO_DIR, f"reel_{i}_{ts}.mp4")
-        print(f"  Searching Pexels: '{kw}'")
-        has_vid   = download_pexels_video(kw, vid_bg)
-        has_photo = download_pexels_photo(kw, photo_bg) if not has_vid else False
+
+    try:
+        with open(SCRIPTS_FILE, "r", encoding="utf-8") as f:
+            scripts_data = json.load(f)["scripts"]
+    except FileNotFoundError:
+        print("ERROR: scripts.json not found!"); sys.exit(1)
+
+    try:
+        with open(os.path.join(AUDIO_DIR, "manifest.json"), "r") as f:
+            audio_files = json.load(f)["audio_files"]
+    except FileNotFoundError:
+        print("ERROR: Audio manifest not found!"); sys.exit(1)
+
+    print(f"\nScripts: {len(scripts_data)}  Audio: {len(audio_files)}\n")
+    created_videos = []
+
+    for i, (script_data, audio_data) in enumerate(zip(scripts_data, audio_files), 1):
+        topic = script_data.get("topic", f"News {i}")
+        print(f"\n{'='*60}")
+        print(f"Video {i}/{len(scripts_data)}: {topic[:60]}")
+        print(f"{'='*60}")
+
+        audio_path = audio_data.get("audio_file", "")
+        if not os.path.exists(audio_path):
+            print(f"  ERROR: Audio not found: {audio_path}"); continue
+
+        spoken_text = extract_spoken_text(script_data.get("script", "")) or topic
+        keywords    = get_topic_keywords(topic)
+        timestamp   = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        bg_vid_path    = os.path.join(ASSETS_DIR, f"bg_video_{i}.mp4")
+        bg_photo_path  = os.path.join(ASSETS_DIR, f"bg_photo_{i}.jpg")
+        pix_vid_path   = os.path.join(ASSETS_DIR, f"pbay_video_{i}.mp4")
+        pix_photo_path = os.path.join(ASSETS_DIR, f"pbay_photo_{i}.jpg")
+        output_path    = os.path.join(VIDEO_DIR, f"reel_{i}_{timestamp}.mp4")
+
+        print(f"  Keywords: '{keywords}'")
+
+        got_video = got_photo = False
+        final_vid = final_photo = None
+
+        print("  Trying Pexels video ...")
+        if download_pexels_video(keywords, bg_vid_path):
+            got_video = True; final_vid = bg_vid_path
+
+        if not got_video:
+            print("  Trying Pixabay video ...")
+            if download_pixabay_video(keywords, pix_vid_path):
+                got_video = True; final_vid = pix_vid_path
+
+        if not got_video:
+            print("  Trying Pexels photo ...")
+            if download_pexels_photo(keywords, bg_photo_path):
+                got_photo = True; final_photo = bg_photo_path
+
+        if not got_video and not got_photo:
+            print("  Trying Pixabay photo ...")
+            if download_pixabay_photo(keywords, pix_photo_path):
+                got_photo = True; final_photo = pix_photo_path
+
+        if not got_video and not got_photo:
+            print("  No external background -- using animated gradient")
+
         try:
-            create_video(apath, spoken, topic, out,
-                         bg_vid=vid_bg   if has_vid   else None,
-                         bg_photo=photo_bg if has_photo else None)
-            if os.path.exists(out):
-                mb = os.path.getsize(out)/(1024*1024)
-                created.append({"topic": topic, "video_file": out, "size_mb": round(mb,1)})
+            success = create_news_video(
+                audio_path, spoken_text, topic, output_path,
+                bg_video_path = final_vid,
+                bg_photo_path = final_photo,
+            )
+            if success and os.path.exists(output_path):
+                sz = os.path.getsize(output_path) / (1024 * 1024)
+                created_videos.append({
+                    "topic":      topic,
+                    "video_file": output_path,
+                    "size_mb":    round(sz, 1),
+                    "bg_source":  "video" if got_video else ("photo" if got_photo else "gradient"),
+                })
+                print(f"  Done: {sz:.1f} MB saved")
+            else:
+                print(f"  FAILED: Video not created for: {topic}")
         except Exception as e:
-            print(f"  FAILED: {e}")
+            print(f"  Exception: {e}")
             import traceback; traceback.print_exc()
-    with open(os.path.join(VIDEO_DIR,"manifest.json"),"w",encoding="utf-8") as f:
-        json.dump({"videos": created, "created_at": datetime.now().strftime("%Y-%m-%d %H:%M")},
-                  f, ensure_ascii=False, indent=2)
-    print(f"\n{len(created)} videos done -> {VIDEO_DIR}")
+
+    manifest_path = os.path.join(VIDEO_DIR, "manifest.json")
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump({
+            "videos":     created_videos,
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "count":      len(created_videos),
+        }, f, ensure_ascii=False, indent=2)
+
+    print(f"\n{'='*60}")
+    print(f"DONE: {len(created_videos)}/{len(scripts_data)} videos created -> {VIDEO_DIR}")
+    if not created_videos:
+        print("ZERO videos created -- check logs above for errors")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
