@@ -229,7 +229,7 @@ def run_sadtalker(face_path, audio_path, out_dir):
         "--pose_style",       "1",
         "--preprocess",       "full",
         "--size",             "256",
-        # --still intentionally NOT included -> full motion enabled
+        "--still",             # freeze head/body -- lip-sync only (real news reader look)
     ]
 
     print("  [SadTalker] Generating body motion (CPU ~15-30 min)...")
@@ -508,17 +508,51 @@ def centre_shadow(draw, text, font, y, fill=(255, 255, 255)):
 # C. Header topic -- Tamil if font OK, else clean English keywords
 # ===========================================================================
 def _header_topic(topic: str) -> str:
-    if _tamil_font_ok:
-        return topic
+    """Always returns English keywords for the header -- never Tamil script."""
     import re
     ascii_words = re.findall(r'[A-Za-z]{2,}', topic)
     result = " ".join(ascii_words[:8])
-    return result if result.strip() else "Breaking News"
+    return result.strip() if result.strip() else "Breaking News"
 
 
 # ===========================================================================
 # B. News graphics -- lower-third caption, clean header
 # ===========================================================================
+# ===========================================================================
+# News banner fallback (shown when no topic image is available)
+# ===========================================================================
+def _draw_news_banner(draw, img, top_y, bottom_y, topic, font_topic):
+    """
+    Draw a professional news-style graphic banner with English topic text
+    when no photo is available. Looks like a real news channel graphic.
+    """
+    banner_h = bottom_y - top_y
+    for row in range(banner_h):
+        ratio = row / banner_h
+        r = int(5  + 15 * (1 - ratio))
+        g = int(10 + 20 * (1 - ratio))
+        b = int(60 + 40 * (1 - ratio))
+        draw.rectangle([0, top_y + row, img.width, top_y + row + 1], fill=(r, g, b))
+    draw.rectangle([0, top_y, 12, bottom_y], fill=(200, 20, 20))
+    draw.rectangle([0, top_y, img.width, top_y + 4], fill=(255, 255, 255))
+    try:
+        from PIL import ImageFont as _IF
+        lbl_font = _IF.truetype("/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf", 36)
+    except Exception:
+        lbl_font = font_topic
+    draw.rectangle([28, top_y + 30, 308, top_y + 80], fill=(180, 10, 10))
+    draw.text((38, top_y + 33), "LATEST NEWS", font=lbl_font, fill=(255, 255, 255))
+    eng_topic = topic_keywords(topic) or topic[:60]
+    words = eng_topic.upper().split()
+    mid = max(1, len(words) // 2)
+    lines = [' '.join(words[:mid]), ' '.join(words[mid:])]
+    ty = top_y + 110
+    for line in lines:
+        if line.strip():
+            shadow_text(draw, (28, ty), line, font_topic, fill=(255, 215, 0))
+            ty += 75
+
+
 # ===========================================================================
 # Fetch relevant topic image (cached per topic)
 # ===========================================================================
@@ -611,18 +645,16 @@ def draw_news_graphics(bg_frame, topic, caption_text,
                 nw_i = W
                 nh_i = int(th_i * scale_i)
                 img_resized = topic_img.resize((nw_i, nh_i), Image.LANCZOS)
-                # Centre-crop vertically to fit IMG_H
                 crop_top = max(0, (nh_i - IMG_H) // 2)
                 img_cropped = img_resized.crop((0, crop_top, nw_i, crop_top + IMG_H))
                 img.paste(img_cropped, (0, IMG_TOP))
-                # Gradient fade at bottom of image so topic text is readable
                 draw = ImageDraw.Draw(img)
+                print(f"  [TopicImg] Displayed image in header zone")
             except Exception as e:
                 print(f"  [TopicImg draw] {e}")
-                draw.rectangle([0, IMG_TOP, W, TOPIC_TOP], fill=(10, 20, 60))
+                _draw_news_banner(draw, img, IMG_TOP, TOPIC_TOP, topic, font_topic)
         else:
-            # Fallback dark block if no image available
-            draw.rectangle([0, IMG_TOP, W, TOPIC_TOP], fill=(10, 20, 60))
+            _draw_news_banner(draw, img, IMG_TOP, TOPIC_TOP, topic, font_topic)
 
         # ── TOPIC BAR (positioned below the relevant image) ──────────────────
         draw.rectangle([0, TOPIC_TOP, W, TOPIC_TOP + 144], fill=(0, 0, 0, 210))
