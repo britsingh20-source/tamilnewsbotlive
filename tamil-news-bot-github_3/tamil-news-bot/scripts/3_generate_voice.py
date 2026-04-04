@@ -71,7 +71,7 @@ def post_process_audio(input_path: str, output_path: str) -> str:
         "equalizer=f=2800:width_type=o:width=2:g=2,"
         "acompressor=threshold=0.089:ratio=4:attack=5:release=50,"
         "volume=3.0,"
-        "atempo=0.85"
+        "atempo=0.92"
     )
     cmd = [
         "ffmpeg", "-y", "-i", input_path,
@@ -131,7 +131,7 @@ def generate_audio_gtts(text, output_path, lang="ta"):
     """Generate audio using Google TTS (free), slow=True for natural pace"""
     try:
         from gtts import gTTS
-        tts = gTTS(text=text, lang=lang, slow=True)
+        tts = gTTS(text=text, lang=lang, slow=False)
         tts.save(output_path)
         return True
     except ImportError:
@@ -139,7 +139,7 @@ def generate_audio_gtts(text, output_path, lang="ta"):
         os.system("pip install gtts --break-system-packages -q")
         try:
             from gtts import gTTS
-            tts = gTTS(text=text, lang=lang, slow=True)
+            tts = gTTS(text=text, lang=lang, slow=False)
             tts.save(output_path)
             return True
         except Exception as e:
