@@ -3,23 +3,88 @@ STEP 2: Auto-Write Tamil Script using OpenAI API
 - Reads top topic from topics.json
 - Calls OpenAI API to generate a 60-sec Tamil Reel script
 - Saves script to scripts.json
+
+PATCH 1 applied:
+- Content filter blocks inappropriate topics before API call
+- filter_script_content() removes any inappropriate lines after generation
+- System prompt enforces family-friendly news-only content
 """
 
 import requests
 import json
 import os
+import re
 from datetime import datetime
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "YOUR_OPENAI_API_KEY_HERE")
-TOPICS_FILE = os.path.join(os.path.dirname(__file__), "../output/topics.json")
+TOPICS_FILE  = os.path.join(os.path.dirname(__file__), "../output/topics.json")
 SCRIPTS_FILE = os.path.join(os.path.dirname(__file__), "../output/scripts.json")
+
+
+# ===========================================================================
+# PATCH 1A — Content filter
+# ===========================================================================
+_BLOCKED_WORDS = [
+    # Adult / inappropriate
+    "condom", "contraceptive", "sex", "sexual", "porn", "nude", "naked",
+    "prostitut", "escort", "adult film", "xxx", "erotic",
+    "rape", "molest", "assault",
+    # Drugs
+    "drug deal", "cocaine", "heroin", "narcotic",
+    # Extreme violence
+    "bomb making", "how to kill", "suicide method",
+]
+
+def is_topic_appropriate(topic: str) -> bool:
+    """Return False if topic contains any blocked content."""
+    topic_lower = topic.lower()
+    for word in _BLOCKED_WORDS:
+        if word.lower() in topic_lower:
+            print(f"  [Filter] BLOCKED topic -- contains '{word}': {topic[:60]}")
+            return False
+    return True
+
+def filter_script_content(script_text: str) -> str:
+    """
+    Second-pass safety filter: remove any line in the generated script
+    that contains a blocked word. Protects against the LLM sneaking
+    inappropriate content into body text even when the topic looks clean.
+    """
+    lines   = script_text.split("\n")
+    clean   = []
+    removed = 0
+    for line in lines:
+        if any(w.lower() in line.lower() for w in _BLOCKED_WORDS):
+            print(f"  [Filter] Removed line: {line[:70]}")
+            removed += 1
+        else:
+            clean.append(line)
+    if removed:
+        print(f"  [Filter] Removed {removed} inappropriate line(s)")
+    return "\n".join(clean)
+
+
+# ===========================================================================
+# PATCH 1B — Safe system prompt (enforces news-only content)
+# ===========================================================================
+SYSTEM_PROMPT = """You are a professional Tamil news channel script writer for Instagram Reels and YouTube Shorts.
+
+STRICT CONTENT RULES — follow without exception:
+- Write ONLY family-friendly news content suitable for ALL ages and all audiences
+- NEVER mention: sexual products, contraceptives, adult content, violence details, drugs, alcohol
+- NEVER write anything that would embarrass a TV news channel
+- Topics must be: politics, economy, sports, weather, education, technology,
+  Tamil Nadu local news, business, infrastructure, health (general only), culture
+- Tone: formal, respectful, professional Tamil news anchor style
+- No sensationalism, no clickbait that involves adult or violent content
+- If the given topic is inappropriate, write about the most recent Tamil Nadu government news instead
+"""
+
 
 def generate_tamil_script(topic_title, topic_description=""):
     """Generate a Tamil news Reel script using OpenAI API"""
 
-    prompt = f"""You are a Tamil news anchor script writer for Instagram Reels and YouTube Shorts.
-
-Write a viral Tamil news script for this topic: "{topic_title}"
+    prompt = f"""Write a viral Tamil news script for this topic: "{topic_title}"
 Additional context: {topic_description}
 
 FORMAT (strictly follow this):
@@ -59,7 +124,9 @@ Rules:
         "model": "gpt-4o",
         "max_tokens": 1000,
         "messages": [
-            {"role": "user", "content": prompt}
+            # PATCH 1B: system prompt now enforces family-safe content
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user",   "content": prompt}
         ]
     }
 
@@ -70,12 +137,13 @@ Rules:
             json=body,
             timeout=30
         )
-        data = resp.json()
+        data        = resp.json()
         script_text = data["choices"][0]["message"]["content"]
         return script_text
     except Exception as e:
         print(f"OpenAI API error: {e}")
         return None
+
 
 def extract_hook(script_text):
     """Extract just the hook line for video overlay"""
@@ -87,6 +155,7 @@ def extract_hook(script_text):
                     return lines[j].strip()
     return ""
 
+
 def main():
     print("✍️  Generating Tamil Scripts using OpenAI GPT-4o...")
     print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
@@ -94,7 +163,7 @@ def main():
     # Load topics
     try:
         with open(TOPICS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
+            data   = json.load(f)
         topics = data["topics"]
     except FileNotFoundError:
         print("❌ topics.json not found. Run 1_find_news.py first!")
@@ -102,18 +171,27 @@ def main():
 
     all_scripts = []
 
-    # Generate scripts for top 3 topics
     for i, topic in enumerate(topics[:3], 1):
         print(f"📝 Generating script {i}/3: {topic['title'][:50]}...")
+
+        # PATCH 1A: block inappropriate topics before API call
+        if not is_topic_appropriate(topic["title"]):
+            print(f"   ⚠️  Skipped -- inappropriate topic")
+            continue
+
         script = generate_tamil_script(
             topic["title"],
             topic.get("description", "")
         )
+
         if script:
+            # PATCH 1A: second-pass filter on generated content
+            script = filter_script_content(script)
+
             all_scripts.append({
-                "topic": topic["title"],
-                "script": script,
-                "hook": extract_hook(script),
+                "topic":        topic["title"],
+                "script":       script,
+                "hook":         extract_hook(script),
                 "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M")
             })
             print(f"   ✅ Script generated!")
@@ -126,12 +204,12 @@ def main():
 
     print(f"\n✅ {len(all_scripts)} scripts saved to: {SCRIPTS_FILE}")
 
-    # Print first script preview
     if all_scripts:
         print(f"\n--- PREVIEW: First Script ---")
-        print(f"Topic: {all_scripts[0]['topic']}")
-        print(f"Hook: {all_scripts[0]['hook']}")
+        print(f"Topic:         {all_scripts[0]['topic']}")
+        print(f"Hook:          {all_scripts[0]['hook']}")
         print(f"Script length: {len(all_scripts[0]['script'])} chars")
+
 
 if __name__ == "__main__":
     main()
