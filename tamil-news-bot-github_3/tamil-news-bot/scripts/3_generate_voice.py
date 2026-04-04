@@ -4,10 +4,10 @@ STEP 3: Auto-Generate Tamil Voiceover (FREE)
 - Reads scripts.json and generates MP3 audio files
 - Saves audio to output/audio/ folder
 
-PATCH 2 applied:
-- humanize_text_for_tts(): adds natural pauses, cleans symbols before TTS
-- post_process_audio(): ffmpeg EQ + compression makes voice warmer, less robotic
-- gTTS called with slow=True for more deliberate delivery pace
+v2 patch (safe):
+- humanize_text_for_tts() now only strips ASCII symbols -- never touches Tamil Unicode
+- post_process_audio() ffmpeg chain: warmth EQ + compression + slight slowdown
+- gTTS slow=True for more deliberate delivery
 """
 
 import json
@@ -21,54 +21,32 @@ AUDIO_DIR    = os.path.join(os.path.dirname(__file__), "../output/audio")
 
 
 # ===========================================================================
-# PATCH 2A — Humanize text before sending to TTS
+# Safe humanize -- ONLY strips ASCII noise, never touches Tamil characters
 # ===========================================================================
 def humanize_text_for_tts(text: str) -> str:
     """
-    Transform raw script text into TTS-friendly text that sounds
-    more natural and less robotic:
-      - Strips markdown / symbols that TTS reads literally
-      - Adds commas at natural Tamil pause points
-      - Breaks very long sentences at conjunctions
-      - Ensures clean ending
+    Safely prepare text for gTTS. Rules:
+      - Remove ASCII markdown symbols (* _ # ` ~)
+      - Remove [bracket annotations] which are ASCII only
+      - Collapse multiple spaces
+      - Ensure ends with a period
+      - NEVER modify Tamil Unicode characters (U+0B80–U+0BFF range)
     """
-    # Remove markdown formatting symbols
+    # Remove ASCII markdown formatting only
     text = re.sub(r'[*_#`~]', '', text)
 
-    # Remove bracket annotations like [pause], [music]
-    text = re.sub(r'\[.*?\]', '', text)
+    # Remove bracket annotations (ASCII brackets only, safe for Tamil)
+    text = re.sub(r'\[[^\]]*\]', '', text)
 
-    # Collapse extra whitespace
-    text = re.sub(r' +', ' ', text).strip()
+    # Remove lines that are purely dashes/equals (section dividers)
+    lines = text.split('\n')
+    lines = [l for l in lines if not re.match(r'^[-=]{3,}\s*$', l.strip())]
+    text  = ' '.join(lines)
 
-    # Add a pause-comma after common Tamil sentence starters
-    starters = [
-        "இன்று", "நேற்று", "இதன்படி", "அதன்படி", "இதனால்",
-        "மேலும்", "அதாவது", "எனினும்", "ஆனால்", "இருப்பினும்",
-        "சென்னை", "கோவை", "தமிழ்நாடு",
-    ]
-    for s in starters:
-        # Only add comma if one isn't already there
-        text = re.sub(rf'({s})([^,])', rf'\1,\2', text)
-
-    # Remove duplicate commas
-    text = re.sub(r',+', ',', text)
-    text = re.sub(r',\s*,', ',', text)
-
-    # Break very long sentences (>180 chars) at Tamil conjunctions
-    sentences = re.split(r'(?<=[.!?]) +', text)
-    result = []
-    for sent in sentences:
-        if len(sent) > 180:
-            sent = re.sub(
-                r'(\s+)(மேலும்|ஆனால்|எனினும்)',
-                r'. \2', sent
-            )
-        result.append(sent)
-    text = " ".join(result)
+    # Collapse multiple spaces
+    text = re.sub(r'  +', ' ', text).strip()
 
     # Ensure clean ending
-    text = text.strip()
     if text and text[-1] not in '.!?':
         text += '.'
 
@@ -76,15 +54,15 @@ def humanize_text_for_tts(text: str) -> str:
 
 
 # ===========================================================================
-# PATCH 2B — ffmpeg audio post-processing for warmer, less robotic voice
+# ffmpeg post-processing for warmer, less robotic voice
 # ===========================================================================
 def post_process_audio(input_path: str, output_path: str) -> str:
     """
-    Apply ffmpeg audio filter chain to make gTTS less robotic:
-      - equalizer 180Hz +3dB  : bass warmth (gTTS is thin/tinny)
-      - equalizer 2800Hz +2dB : presence/clarity boost
-      - acompressor            : even out volume like a real broadcast
-      - atempo 0.94            : slightly slower = more deliberate delivery
+    Apply ffmpeg audio filters:
+      - equalizer 180Hz +3dB  : bass warmth
+      - equalizer 2800Hz +2dB : presence clarity
+      - acompressor            : even broadcast-style volume
+      - atempo 0.94            : 6% slower = more deliberate delivery
     Returns output_path on success, input_path on failure.
     """
     filter_chain = (
@@ -110,7 +88,7 @@ def post_process_audio(input_path: str, output_path: str) -> str:
             print(f"   [Audio] Post-process failed: {res.stderr[:200]}")
             return input_path
     except FileNotFoundError:
-        print("   [Audio] ffmpeg not found -- skipping post-process (install ffmpeg)")
+        print("   [Audio] ffmpeg not found -- skipping (install ffmpeg)")
         return input_path
     except Exception as e:
         print(f"   [Audio] Post-process error: {e}")
@@ -118,7 +96,7 @@ def post_process_audio(input_path: str, output_path: str) -> str:
 
 
 def extract_spoken_text(script_text):
-    """Extract only the spoken parts (Tamil text) from the full script"""
+    """Extract only the spoken Tamil parts from the full script"""
     lines         = script_text.split("\n")
     spoken_parts  = []
     skip_sections = ["HASHTAGS", "CAPTION", "FORMAT", "RULES"]
@@ -148,10 +126,9 @@ def extract_spoken_text(script_text):
 
 
 def generate_audio_gtts(text, output_path, lang="ta"):
-    """Generate audio using Google TTS (free)"""
+    """Generate audio using Google TTS (free), slow=True for natural pace"""
     try:
         from gtts import gTTS
-        # slow=True gives more deliberate delivery -- less robotic feel
         tts = gTTS(text=text, lang=lang, slow=True)
         tts.save(output_path)
         return True
@@ -172,45 +149,63 @@ def generate_audio_gtts(text, output_path, lang="ta"):
 
 
 def main():
-    print("🎙️  Generating Tamil Voiceovers (FREE via Google TTS)...")
+    print("Generating Tamil Voiceovers (FREE via Google TTS)...")
     print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
 
     os.makedirs(AUDIO_DIR, exist_ok=True)
 
-    # Load scripts
     try:
         with open(SCRIPTS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
         scripts = data["scripts"]
     except FileNotFoundError:
-        print("❌ scripts.json not found. Run 2_generate_script.py first!")
+        print("scripts.json not found. Run 2_generate_script.py first!")
         return
 
     audio_files = []
 
     for i, script_data in enumerate(scripts, 1):
-        print(f"🔊 Generating audio {i}/{len(scripts)}: {script_data['topic'][:40]}...")
+        print(f"Generating audio {i}/{len(scripts)}: {script_data['topic'][:40]}...")
 
-        # Extract spoken text
         spoken_text = extract_spoken_text(script_data["script"])
         if not spoken_text:
             spoken_text = script_data["script"][:500]
 
-        # PATCH 2A: humanize text before TTS
+        # Safe humanize -- strips ASCII noise only, never touches Tamil
         spoken_text = humanize_text_for_tts(spoken_text)
 
-        timestamp   = datetime.now().strftime("%Y%m%d_%H%M%S")
-        raw_path    = os.path.join(AUDIO_DIR, f"audio_{i}_{timestamp}_raw.mp3")
-        final_path  = os.path.join(AUDIO_DIR, f"audio_{i}_{timestamp}.mp3")
+        # Verify we have enough text before calling TTS
+        if len(spoken_text.strip()) < 20:
+            print(f"   WARNING: spoken text too short ({len(spoken_text)} chars) -- skipping")
+            continue
 
-        # Generate TTS audio
+        print(f"   Text length: {len(spoken_text)} chars")
+
+        timestamp  = datetime.now().strftime("%Y%m%d_%H%M%S")
+        raw_path   = os.path.join(AUDIO_DIR, f"audio_{i}_{timestamp}_raw.mp3")
+        final_path = os.path.join(AUDIO_DIR, f"audio_{i}_{timestamp}.mp3")
+
         success = generate_audio_gtts(spoken_text, raw_path)
 
         if success:
-            # PATCH 2B: post-process for warmer, less robotic sound
+            # Verify audio is long enough (>3 seconds minimum)
+            try:
+                result = subprocess.run(
+                    ["ffprobe", "-v", "quiet", "-show_entries",
+                     "format=duration", "-of", "csv=p=0", raw_path],
+                    capture_output=True, text=True, timeout=15
+                )
+                duration = float(result.stdout.strip() or "0")
+                if duration < 3.0:
+                    print(f"   WARNING: audio too short ({duration:.1f}s) -- text may be corrupted")
+                else:
+                    print(f"   Audio duration: {duration:.1f}s -- OK")
+            except Exception:
+                pass
+
+            # Post-process for warmer sound
             final_path = post_process_audio(raw_path, final_path)
 
-            # Clean up raw file if post-processing succeeded
             if final_path != raw_path and os.path.exists(raw_path):
                 os.remove(raw_path)
 
@@ -221,11 +216,10 @@ def main():
                 "spoken_text_preview": spoken_text[:100] + "...",
                 "size_kb":             round(size_kb, 1)
             })
-            print(f"   ✅ Audio saved: {os.path.basename(final_path)} ({size_kb:.0f} KB)")
+            print(f"   Audio saved: {os.path.basename(final_path)} ({size_kb:.0f} KB)")
         else:
-            print(f"   ❌ Audio generation failed")
+            print(f"   Audio generation FAILED")
 
-    # Save audio manifest
     manifest_path = os.path.join(AUDIO_DIR, "manifest.json")
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump({
@@ -233,10 +227,11 @@ def main():
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M")
         }, f, ensure_ascii=False, indent=2)
 
-    print(f"\n✅ {len(audio_files)} audio files generated!")
-    print(f"📁 Audio folder: {AUDIO_DIR}")
-    print("\n💡 TIP: For even better voice, use ElevenLabs free tier (10,000 chars/month)")
-    print("   Sign up at: https://elevenlabs.io → Choose Tamil voice → Paste script → Download MP3")
+    print(f"\n{len(audio_files)} audio files generated!")
+    print(f"Audio folder: {AUDIO_DIR}")
+
+    if len(audio_files) == 0:
+        print("\nZERO audio files -- check that scripts.json has Tamil text content")
 
 
 if __name__ == "__main__":
