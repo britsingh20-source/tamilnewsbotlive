@@ -519,6 +519,68 @@ def _header_topic(topic: str) -> str:
 # ===========================================================================
 # B. News graphics -- lower-third caption, clean header
 # ===========================================================================
+# ===========================================================================
+# Fetch relevant topic image (cached per topic)
+# ===========================================================================
+_IMG_CACHE = {}  # topic_key -> PIL Image or None
+
+def fetch_topic_image(topic: str):
+    """
+    Fetch a relevant photo for the topic using Pexels or Pixabay.
+    Returns PIL Image (RGB) sized to display, or None if unavailable.
+    Cached so same topic doesn't re-fetch on every frame.
+    """
+    import hashlib, io as _io, urllib.request as _urllib
+    key = hashlib.md5(topic.encode("utf-8")).hexdigest()
+    if key in _IMG_CACHE:
+        return _IMG_CACHE[key]
+
+    kw = topic_keywords(topic) or topic[:30]
+
+    # Try Pexels
+    if PEXELS_KEY:
+        try:
+            r = _robust_get(
+                "https://api.pexels.com/v1/search",
+                params={"query": kw, "per_page": 1, "orientation": "landscape"},
+                headers={"Authorization": PEXELS_KEY},
+                timeout=10
+            )
+            photos = r.json().get("photos", [])
+            if photos:
+                img_url = photos[0]["src"]["medium"]
+                data = _urllib.urlopen(img_url, timeout=10).read()
+                img = Image.open(_io.BytesIO(data)).convert("RGB")
+                _IMG_CACHE[key] = img
+                print(f"  [TopicImg] Pexels photo fetched for: {kw[:30]}")
+                return img
+        except Exception as e:
+            print(f"  [TopicImg Pexels] {e}")
+
+    # Try Pixabay fallback
+    if PIXABAY_KEY:
+        try:
+            r = _robust_get(
+                "https://pixabay.com/api/",
+                params={"key": PIXABAY_KEY, "q": kw, "image_type": "photo",
+                        "per_page": 3, "safesearch": "true"},
+                timeout=10
+            )
+            hits = r.json().get("hits", [])
+            if hits:
+                img_url = hits[0]["webformatURL"]
+                data = _urllib.urlopen(img_url, timeout=10).read()
+                img = Image.open(_io.BytesIO(data)).convert("RGB")
+                _IMG_CACHE[key] = img
+                print(f"  [TopicImg] Pixabay photo fetched for: {kw[:30]}")
+                return img
+        except Exception as e:
+            print(f"  [TopicImg Pixabay] {e}")
+
+    _IMG_CACHE[key] = None
+    return None
+
+
 def draw_news_graphics(bg_frame, topic, caption_text,
                         font_ch, font_topic, font_cap, font_ad, font_ad2,
                         is_wav2lip=False):
@@ -530,16 +592,43 @@ def draw_news_graphics(bg_frame, topic, caption_text,
         draw = ImageDraw.Draw(img)
 
         # ── TOP HEADER ───────────────────────────────────────────────────────
-        draw.rectangle([0, 0, W, 145],   fill=(5, 15, 70))
-        draw.rectangle([0, 143, W, 151], fill=(200, 20, 20))
+        HEADER_H = 145   # channel name bar height
+        IMG_H    = 400   # relevant image zone height below header
+        IMG_TOP  = HEADER_H
+        TOPIC_TOP = IMG_TOP + IMG_H  # topic bar starts below image
+
+        draw.rectangle([0, 0, W, HEADER_H], fill=(5, 15, 70))
+        draw.rectangle([0, HEADER_H - 2, W, HEADER_H + 6], fill=(200, 20, 20))
         shadow_text(draw, (28, 16), CHANNEL,         font_ch,  fill=(255, 255, 255))
         shadow_text(draw, (28, 82), "BREAKING NEWS", font_ad2, fill=(255, 60,  60))
 
-        # ── TOPIC BAR ────────────────────────────────────────────────────────
-        draw.rectangle([0, 151, W, 295], fill=(0, 0, 0, 210))
-        draw.rectangle([0, 151, 8, 295], fill=(200, 20, 20))
+        # ── RELEVANT TOPIC IMAGE ZONE (below channel bar, top area) ──────────
+        topic_img = fetch_topic_image(topic)
+        if topic_img:
+            try:
+                tw_i, th_i = topic_img.size
+                scale_i = W / tw_i
+                nw_i = W
+                nh_i = int(th_i * scale_i)
+                img_resized = topic_img.resize((nw_i, nh_i), Image.LANCZOS)
+                # Centre-crop vertically to fit IMG_H
+                crop_top = max(0, (nh_i - IMG_H) // 2)
+                img_cropped = img_resized.crop((0, crop_top, nw_i, crop_top + IMG_H))
+                img.paste(img_cropped, (0, IMG_TOP))
+                # Gradient fade at bottom of image so topic text is readable
+                draw = ImageDraw.Draw(img)
+            except Exception as e:
+                print(f"  [TopicImg draw] {e}")
+                draw.rectangle([0, IMG_TOP, W, TOPIC_TOP], fill=(10, 20, 60))
+        else:
+            # Fallback dark block if no image available
+            draw.rectangle([0, IMG_TOP, W, TOPIC_TOP], fill=(10, 20, 60))
+
+        # ── TOPIC BAR (positioned below the relevant image) ──────────────────
+        draw.rectangle([0, TOPIC_TOP, W, TOPIC_TOP + 144], fill=(0, 0, 0, 210))
+        draw.rectangle([0, TOPIC_TOP, 8, TOPIC_TOP + 144], fill=(200, 20, 20))
         display_topic = _header_topic(topic)
-        ty = 162
+        ty = TOPIC_TOP + 11
         for line in wrap_text(draw, display_topic[:100], font_topic, W - 60)[:2]:
             shadow_text(draw, (24, ty), line, font_topic, fill=(255, 215, 0))
             ty += 60
