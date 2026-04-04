@@ -225,11 +225,11 @@ def run_sadtalker(face_path, audio_path, out_dir):
         "--source_image",     face_path,
         "--result_dir",       out_dir,
         "--enhancer",         "gfpgan",
-        "--expression_scale", "1.2",
-        "--pose_style",       "1",
-        "--preprocess",       "full",
+        "--expression_scale", "1.8",           # HIGH: natural head nods + blinks + mouth (HeyGen-like)
+        "--pose_style",       "0",             # natural anchor pose
+        "--preprocess",       "full",          # includes shoulders in output
         "--size",             "256",
-        "--still",             # freeze head/body -- lip-sync only (real news reader look)
+        # --still NOT passed -> full head + body motion enabled
     ]
 
     print("  [SadTalker] Generating body motion (CPU ~15-30 min)...")
