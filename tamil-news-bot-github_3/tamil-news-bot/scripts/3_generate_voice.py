@@ -5,7 +5,7 @@ STEP 3: Auto-Generate Tamil Voiceover (FREE)
 - Saves audio to output/audio/ folder
 
 v2 patch (safe):
-- humanize_text_for_tts() now only strips ASCII symbols -- never touches Tamil Unicode
+- humanize_text_for_tts() now only strips ASCII symbols -- nehver touches Tamil Unicode
 - post_process_audio() ffmpeg chain: warmth EQ + compression + slight slowdown
 - gTTS slow=True for more deliberate delivery
 """
@@ -62,14 +62,16 @@ def post_process_audio(input_path: str, output_path: str) -> str:
       - equalizer 180Hz +3dB  : bass warmth
       - equalizer 2800Hz +2dB : presence clarity
       - acompressor            : even broadcast-style volume
-      - atempo 0.94            : 6% slower = more deliberate delivery
+      - volume 3.0             : 3x louder for Instagram Reels
+      - atempo 0.85            : 15% slower = clear news-reader pace
     Returns output_path on success, input_path on failure.
     """
     filter_chain = (
         "equalizer=f=180:width_type=o:width=2:g=3,"
         "equalizer=f=2800:width_type=o:width=2:g=2,"
         "acompressor=threshold=0.089:ratio=4:attack=5:release=50,"
-        "atempo=0.94"
+        "volume=3.0,"
+        "atempo=0.85"
     )
     cmd = [
         "ffmpeg", "-y", "-i", input_path,
