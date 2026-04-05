@@ -1,34 +1,16 @@
 """
-STEP 4: Tamil News Video Creator (v8 - SadTalker + Wav2Lip)
+STEP 4: Tamil News Video Creator (v9 - SadTalker + Wav2Lip + HeadAnimator)
 ============================================================
-Pipeline:
-  1. SadTalker  : static anchor image -> animated talking-head video
-                  (real head nods, blinks, shoulder sway, expressions)
-  2. Wav2Lip    : animated video -> perfectly lip-synced video
-  3. MoviePy    : composite with news graphics overlay
-
-Changes over v7:
-  A. SadTalker integration  -- auto-detected at /tmp/SadTalker
-     --still flag OFF        -> full head + body motion enabled
-     --expression_scale 1.2  -> slightly expressive
-     --enhancer gfpgan       -> face quality enhancement
-     Fallback chain: SadTalker -> Wav2Lip alone -> BG video -> photo -> gradient
-
-  B. Caption lower-third    -- captions placed in bottom 28% of frame,
-                               never overlapping the anchor face
-
-  C. Header topic            -- Tamil shown if font verified OK,
-                               else English keywords extracted cleanly
-                               (no leftover punctuation / numbers)
-
-  D. AnchorAnimator removed  -- no fake transforms; SadTalker handles motion
-
-  E. All v6/v7 fixes kept    -- force anchor refresh, robust HTTP retry,
-                               Tamil font verification, manifest merging,
-                               extract_spoken robustness, Wav2Lip smoothing
+Fixes in v9:
+  A. Per-video SadTalker timeout (1080s) so video 3 never starves
+  B. Synthetic HeadAnimator for natural news-reader motion fallback
+  C. RSS article image URLs shown on blue screen zone
+  D. topic_keywords uses English description for Tamil titles
+  E. fetch_topic_image tries article thumbnail URL first
+  F. Category-colored topic background fallback
 """
 
-import json, os, io, sys, time, subprocess, requests, numpy as np
+import json, os, io, sys, time, subprocess, requests, numpy as np, math, random
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
 
@@ -56,6 +38,7 @@ PIXABAY_KEY = os.environ.get("PIXABAY_API_KEY", "")
 SADTALKER_DIR        = "/tmp/SadTalker"
 SADTALKER_SCRIPT     = os.path.join(SADTALKER_DIR, "inference.py")
 SADTALKER_CHECKPOINT = os.path.join(SADTALKER_DIR, "checkpoints")
+SADTALKER_TIMEOUT    = 1080   # 18 min per video - ensures all 3 videos get processed
 
 # Wav2Lip paths
 WAV2LIP_DIR        = "/tmp/Wav2Lip"
@@ -70,149 +53,91 @@ CAPTION_BOTTOM_PCT = 0.92
 # Robust HTTP with exponential backoff
 # ===========================================================================
 def _robust_get(url, retries=3, backoff=2, **kwargs):
-    last = None
-    for attempt in range(1, retries + 1):
+    for attempt in range(retries):
         try:
             r = requests.get(url, **kwargs)
-            if r.status_code < 500:
+            if r.status_code == 200:
                 return r
-            raise requests.HTTPError(f"HTTP {r.status_code}")
         except Exception as e:
-            last = e
-            wait = backoff ** attempt
-            print(f"    [retry {attempt}/{retries}] {e} -- wait {wait}s")
-            time.sleep(wait)
-    raise last
+            if attempt == retries - 1:
+                raise
+            time.sleep(backoff ** attempt)
+    return r
 
 
 # ===========================================================================
 # Font loading with Tamil glyph verification
 # ===========================================================================
-TAMIL_FONT_PATHS = [
-    "/usr/share/fonts/truetype/noto/NotoSansTamil-Regular.ttf",
-    "/usr/share/fonts/truetype/noto/NotoSansTamil[wdth,wght].ttf",
-    "/usr/share/fonts/opentype/noto/NotoSansTamil-Regular.otf",
-    "/usr/share/fonts/truetype/lohit-tamil/Lohit-Tamil.ttf",
-]
-LATIN_FONT_PATHS = [
-    "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
-    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-]
-
-_font_cache        = {}
-_tamil_font_ok     = None
-_tamil_font_warned = False
-_TAMIL_TEST        = "த"
-
-
 def _font_renders_tamil(font):
     try:
-        img  = Image.new("RGB", (60, 60), (255, 255, 255))
-        draw = ImageDraw.Draw(img)
-        draw.text((5, 5), _TAMIL_TEST, font=font, fill=(0, 0, 0))
-        arr  = np.array(img)
-        return bool((arr[10:50, 5:55] < 200).any())
+        img = Image.new("RGB", (100, 100))
+        d   = ImageDraw.Draw(img)
+        d.text((0, 0), "\u0ba4\u0bae\u0bbf\u0bb4\u0bcd", font=font)
+        arr = np.array(img)
+        return arr.max() > 30
     except Exception:
         return False
 
-
 def _try_install_tamil():
     try:
-        res = subprocess.run(
-            ["sudo", "apt-get", "install", "-y",
-             "fonts-noto-core", "fonts-lohit-taml"],
-            capture_output=True, text=True, timeout=120)
-        if res.returncode == 0:
-            subprocess.run(["fc-cache", "-f", "-v"],
-                           capture_output=True, timeout=30)
-            return True
+        subprocess.run(
+            ["apt-get", "install", "-y", "-q", "fonts-noto-color-emoji",
+             "fonts-noto-cjk", "fonts-lohit-taml"],
+            capture_output=True, timeout=90
+        )
+        subprocess.run(["fc-cache", "-f", "-v"], capture_output=True, timeout=30)
     except Exception as e:
-        print(f"  [Font] apt error: {e}")
-    return False
-
+        print(f"  [Font install] {e}")
 
 def load_font(size, tamil=False):
-    global _tamil_font_ok, _tamil_font_warned
-    key = (size, tamil)
-    if key in _font_cache:
-        return _font_cache[key]
-
-    paths = TAMIL_FONT_PATHS if tamil else LATIN_FONT_PATHS
-    for p in paths:
-        if not os.path.exists(p):
-            continue
-        try:
-            font = ImageFont.truetype(p, size)
-            if tamil:
-                if _font_renders_tamil(font):
-                    _tamil_font_ok   = True
-                    _font_cache[key] = font
-                    return font
-            else:
-                _font_cache[key] = font
-                return font
-        except Exception:
-            continue
-
-    if tamil and not _tamil_font_warned:
-        _tamil_font_warned = True
-        _tamil_font_ok     = False
-        print("  [Font] WARNING: No Tamil font -- attempting auto-install...")
-        if _try_install_tamil():
-            for p in TAMIL_FONT_PATHS:
-                if os.path.exists(p):
-                    try:
-                        font = ImageFont.truetype(p, size)
-                        if _font_renders_tamil(font):
-                            _tamil_font_ok   = True
-                            _font_cache[key] = font
-                            return font
-                    except Exception:
-                        pass
-        print("  [Font] Failed. Run: sudo apt-get install fonts-noto-core fonts-lohit-taml")
-
-    for p in LATIN_FONT_PATHS:
-        if os.path.exists(p):
+    tamil_fonts = [
+        "/usr/share/fonts/truetype/noto/NotoSansTamil-Regular.ttf",
+        "/usr/share/fonts/truetype/lohit-tamil/Lohit-Tamil.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+    fallback_fonts = [
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+    search = tamil_fonts if tamil else fallback_fonts
+    for path in search:
+        if os.path.exists(path):
             try:
-                font = ImageFont.truetype(p, size)
-                _font_cache[key] = font
+                font = ImageFont.truetype(path, size)
+                if tamil and not _font_renders_tamil(font):
+                    continue
                 return font
             except Exception:
                 continue
+    if tamil:
+        _try_install_tamil()
+        for path in tamil_fonts:
+            if os.path.exists(path):
+                try:
+                    font = ImageFont.truetype(path, size)
+                    if _font_renders_tamil(font):
+                        return font
+                except Exception:
+                    continue
     return ImageFont.load_default()
 
 
 # ===========================================================================
-# A. SadTalker -- static image -> animated body+head video
+# A. SadTalker - real body+head animated video
 # ===========================================================================
 def run_sadtalker(face_path, audio_path, out_dir):
     """
-    Run SadTalker to generate full head+body motion video from still image.
-
-    Movements produced by SadTalker:
-      - Head nods (driven by audio rhythm)
-      - Natural eye blinks (learned)
-      - Shoulder / upper-body sway
-      - Facial expressions (eyebrows, mouth corners)
-
-    Flags:
-      --preprocess full   : includes shoulders in output (not just face crop)
-      --expression_scale  : 1.2 = slightly expressive, not over-the-top
-      --pose_style 1      : natural news-reader head movement style
-      --enhancer gfpgan   : GFPGAN sharpens face after animation
-      --still NOT passed  : enables full motion (passing --still freezes pose)
-      --size 256          : 256=fast CPU; change to 512 for better quality
+    Run SadTalker: real head nods, eye blinks, shoulder sway, facial expressions.
+    v9: Per-video timeout = SADTALKER_TIMEOUT (18 min) so all 3 videos complete.
     """
     if not os.path.exists(SADTALKER_SCRIPT):
-        print("  [SadTalker] Not found -- skipping")
-        print("  Install: git clone https://github.com/OpenTalker/SadTalker /tmp/SadTalker")
+        print("  [SadTalker] Not found -- using HeadAnimator fallback")
         return None
     if not os.path.exists(SADTALKER_CHECKPOINT):
-        print("  [SadTalker] Checkpoints missing -- skipping")
-        print("  Download: bash /tmp/SadTalker/scripts/download_models.sh")
+        print("  [SadTalker] Checkpoints missing -- using HeadAnimator fallback")
         return None
     if not face_path or not os.path.exists(face_path):
         print("  [SadTalker] No face image"); return None
@@ -225,18 +150,17 @@ def run_sadtalker(face_path, audio_path, out_dir):
         "--source_image",     face_path,
         "--result_dir",       out_dir,
         "--enhancer",         "gfpgan",
-        "--expression_scale", "1.8",           # HIGH: natural head nods + blinks + mouth (HeyGen-like)
-        "--pose_style",       "0",             # natural anchor pose
-        "--preprocess",       "full",          # includes shoulders in output
+        "--expression_scale", "1.8",
+        "--pose_style",       "0",
+        "--preprocess",       "full",
         "--size",             "256",
-        # --still NOT passed -> full head + body motion enabled
     ]
 
-    print("  [SadTalker] Generating body motion (CPU ~15-30 min)...")
+    print(f"  [SadTalker] Generating (timeout={SADTALKER_TIMEOUT}s)...")
     try:
         proc = subprocess.run(
             cmd, cwd=SADTALKER_DIR,
-            capture_output=True, text=True, timeout=2400
+            capture_output=True, text=True, timeout=SADTALKER_TIMEOUT
         )
         if proc.stdout:
             print("  [SadTalker OUT]", proc.stdout[-400:])
@@ -244,8 +168,6 @@ def run_sadtalker(face_path, audio_path, out_dir):
             print(f"  [SadTalker ERR] code={proc.returncode}")
             print(proc.stderr[-400:] if proc.stderr else "")
             return None
-
-        # Find newest mp4 in output dir
         found = []
         for root, dirs, files in os.walk(out_dir):
             for f in files:
@@ -254,66 +176,158 @@ def run_sadtalker(face_path, audio_path, out_dir):
                     found.append((os.path.getmtime(full), full))
         if not found:
             print("  [SadTalker] No output mp4 found"); return None
-
         found.sort(reverse=True)
         result = found[0][1]
         print(f"  [SadTalker] Done: {result} ({os.path.getsize(result)/1e6:.1f} MB)")
         return result
-
     except subprocess.TimeoutExpired:
-        print("  [SadTalker] Timeout after 40 min"); return None
+        print(f"  [SadTalker] Timeout after {SADTALKER_TIMEOUT}s -- HeadAnimator will be used")
+        return None
     except Exception as e:
         print(f"  [SadTalker] Exception: {e}"); return None
 
 
 # ===========================================================================
-# Wav2Lip -- lip sync on SadTalker video or static face image
+# B. Wav2Lip - lip sync
 # ===========================================================================
 def run_wav2lip(face_input, audio_path, output_path):
-    if not os.path.exists(WAV2LIP_DIR):
-        print("  [Wav2Lip] Not installed"); return False
     if not os.path.exists(WAV2LIP_CHECKPOINT):
-        print("  [Wav2Lip] Checkpoint missing"); return False
+        print("  [Wav2Lip] Checkpoint not found"); return False
     if not face_input or not os.path.exists(face_input):
         print("  [Wav2Lip] No face input"); return False
-
-    wav_path = audio_path.rsplit('.', 1)[0] + '_wl16k.wav'
-    conv = subprocess.run(
-        ['ffmpeg', '-y', '-i', audio_path, '-ar', '16000', '-ac', '1', wav_path],
-        capture_output=True, text=True, timeout=60)
-    if conv.returncode != 0:
-        print(f"  [Wav2Lip] Audio convert failed"); return False
-
     cmd = [
-        sys.executable, 'inference.py',
-        '--checkpoint_path',     WAV2LIP_CHECKPOINT,
-        '--face',                face_input,
-        '--audio',               wav_path,
-        '--outfile',             output_path,
-        '--resize_factor',       '1',
-        '--pads',                '0', '15', '0', '0',
-        '--face_det_batch_size', '4',
-        '--wav2lip_batch_size',  '64',
+        sys.executable,
+        os.path.join(WAV2LIP_DIR, "inference.py"),
+        "--checkpoint_path", WAV2LIP_CHECKPOINT,
+        "--face",            face_input,
+        "--audio",           audio_path,
+        "--outfile",         output_path,
+        "--fps",             str(FPS),
+        "--pads",            "0", "10", "0", "0",
+        "--resize_factor",   "1",
+        "--nosmooth",
     ]
-    print(f"  [Wav2Lip] Input: {os.path.basename(face_input)}")
-    print("  [Wav2Lip] Lip sync running (CPU ~10-20 min)...")
+    print("  [Wav2Lip] Running lip sync...")
     try:
-        proc = subprocess.run(cmd, cwd=WAV2LIP_DIR, capture_output=True,
-                              text=True, timeout=1800)
+        proc = subprocess.run(
+            cmd, cwd=WAV2LIP_DIR,
+            capture_output=True, text=True, timeout=600
+        )
         if proc.returncode != 0:
-            print(f"  [Wav2Lip ERR] {proc.stderr[-400:]}"); return False
-        if os.path.exists(output_path) and os.path.getsize(output_path) > 10_000:
+            print(f"  [Wav2Lip ERR] code={proc.returncode}")
+            print(proc.stderr[-400:] if proc.stderr else "")
+            return False
+        success = os.path.exists(output_path) and os.path.getsize(output_path) > 50000
+        if success:
             print(f"  [Wav2Lip] Done: {os.path.getsize(output_path)/1e6:.1f} MB")
-            return True
-        return False
+        return success
     except subprocess.TimeoutExpired:
         print("  [Wav2Lip] Timeout"); return False
     except Exception as e:
-        print(f"  [Wav2Lip] {e}"); return False
+        print(f"  [Wav2Lip] Exception: {e}"); return False
 
 
 # ===========================================================================
-# Anchor face (force refresh from supplied PNG)
+# C. HeadAnimator - synthetic natural news-reader head/body movement
+#    Fallback when SadTalker unavailable or timed out
+# ===========================================================================
+class HeadAnimator:
+    """
+    Natural head+body movement on static anchor face image.
+    News-reader style: slow nods, slight sway, breathing, eye blinks.
+    """
+
+    def __init__(self, face_img_path, duration, fps=FPS):
+        self.duration = duration
+        self.fps      = fps
+        self.img      = None
+        self.arr      = None
+
+        if face_img_path and os.path.exists(face_img_path):
+            try:
+                pil  = Image.open(face_img_path).convert("RGB")
+                # Scale face to fill lower 55% of frame width
+                scale = W / pil.width
+                new_h = int(pil.height * scale)
+                pil   = pil.resize((W, new_h), Image.LANCZOS)
+                self.img = pil
+                self.arr = np.array(pil)
+                print(f"  [HeadAnimator] Face loaded: {W}x{new_h}")
+            except Exception as e:
+                print(f"  [HeadAnimator] Load error: {e}")
+
+        rng = random.Random(int(duration * 100))
+        self.nod_phase    = rng.uniform(0, math.pi * 2)
+        self.sway_phase   = rng.uniform(0, math.pi * 2)
+        self.breathe_phase= rng.uniform(0, math.pi * 2)
+        self.tilt_phase   = rng.uniform(0, math.pi * 2)
+
+        # Blink times (random, every 3-5 sec)
+        self.blinks = []
+        t = rng.uniform(1.5, 3.5)
+        while t < duration - 0.5:
+            self.blinks.append(t)
+            t += rng.uniform(2.5, 5.0)
+
+    def get_frame(self, t):
+        """Return H x W x 3 numpy array for time t."""
+        # Dark studio blue background
+        canvas = np.zeros((H, W, 3), dtype=np.uint8)
+        for y in range(0, H, 4):
+            v = int(8 + 14 * y / H)
+            canvas[y:y+4, :] = [v, v + 3, v + 28]
+
+        if self.arr is None:
+            return canvas
+
+        img_h, img_w = self.arr.shape[:2]
+
+        # Natural news-reader movements
+        nod_y    = int(7  * math.sin(2 * math.pi * 0.33 * t + self.nod_phase))
+        sway_x   = int(5  * math.sin(2 * math.pi * 0.17 * t + self.sway_phase))
+        breathe  = 1.0 + 0.004 * math.sin(2 * math.pi * 0.23 * t + self.breathe_phase)
+        tilt_x   = int(3  * math.sin(2 * math.pi * 0.11 * t + self.tilt_phase))
+
+        blink_y = 0
+        for blink_t in self.blinks:
+            dt = abs(t - blink_t)
+            if dt < 0.12:
+                blink_y = int(4 * (1 - dt / 0.12))
+
+        dy = nod_y + blink_y
+        dx = sway_x + tilt_x
+
+        # Apply breathing scale
+        try:
+            scale_h = int(img_h * breathe)
+            scale_w = int(img_w * breathe)
+            face_arr = np.array(Image.fromarray(self.arr).resize((scale_w, scale_h), Image.BILINEAR))
+            dy_c = (scale_h - img_h) // 2
+            dx_c = (scale_w - img_w) // 2
+            face_arr = face_arr[dy_c:dy_c+img_h, dx_c:dx_c+img_w]
+        except Exception:
+            face_arr = self.arr
+
+        # Paste face centered horizontally, upper portion of frame
+        face_top  = int(H * 0.04) + dy
+        face_left = (W - img_w) // 2 + dx
+
+        src_top  = max(0, -face_top)
+        src_left = max(0, -face_left)
+        dst_top  = max(0, face_top)
+        dst_left = max(0, face_left)
+        ph = min(img_h - src_top, H - dst_top)
+        pw = min(img_w - src_left, W - dst_left)
+
+        if ph > 0 and pw > 0:
+            canvas[dst_top:dst_top+ph, dst_left:dst_left+pw] = \
+                face_arr[src_top:src_top+ph, src_left:src_left+pw]
+
+        return canvas
+
+
+# ===========================================================================
+# Anchor face preparation
 # ===========================================================================
 def prepare_anchor_face(assets_dir):
     face_path = os.path.join(assets_dir, "anchor_face.jpg")
@@ -387,191 +401,181 @@ def _stream_video(url, out_path, max_mb=30):
             if downloaded > max_mb * 1024 * 1024: break
     return os.path.getsize(out_path) > 100_000
 
-
 def download_pexels_video(keywords, out_path):
     if not PEXELS_KEY: return False
     try:
-        for query in [keywords, "india news broadcast"]:
+        for q in [keywords, "tamil news", "india news"]:
             r = _robust_get("https://api.pexels.com/videos/search",
                             headers={"Authorization": PEXELS_KEY},
-                            params={"query": query, "per_page": 5,
+                            params={"query": q, "per_page": 3,
                                     "orientation": "portrait"}, timeout=15)
-            videos = r.json().get("videos", [])
-            if not videos: continue
-            files   = videos[0].get("video_files", [])
-            portrait= [f for f in files if f.get("width", 0) < f.get("height", 0)]
-            cands   = sorted(portrait or files, key=lambda f: f.get("width", 9999))
-            url     = cands[0].get("link", "") if cands else ""
-            if url and _stream_video(url, out_path): return True
+            for vid in r.json().get("videos", []):
+                for vf in vid.get("video_files", []):
+                    if vf.get("quality") in ("sd", "hd") and vf.get("width", 0) <= 1080:
+                        if _stream_video(vf["link"], out_path):
+                            return True
     except Exception as e: print(f"  [Pexels video] {e}")
     return False
-
 
 def download_pixabay_video(keywords, out_path):
     if not PIXABAY_KEY: return False
     try:
-        for query in [keywords, "india news city"]:
+        for q in [keywords, "news india", "city india"]:
             r = _robust_get("https://pixabay.com/api/videos/",
-                            params={"key": PIXABAY_KEY, "q": query,
-                                    "video_type": "film", "per_page": 5,
-                                    "safesearch": "true"}, timeout=15)
-            hits = r.json().get("hits", [])
-            if not hits: continue
-            vids = hits[0].get("videos", {})
-            url  = (vids.get("medium", {}).get("url") or
-                    vids.get("small",  {}).get("url") or
-                    vids.get("large",  {}).get("url"))
-            if url and _stream_video(url, out_path): return True
+                            params={"key": PIXABAY_KEY, "q": q,
+                                    "video_type": "film", "per_page": 3}, timeout=15)
+            for hit in r.json().get("hits", []):
+                url = hit.get("videos", {}).get("medium", {}).get("url", "")
+                if url and _stream_video(url, out_path):
+                    return True
     except Exception as e: print(f"  [Pixabay video] {e}")
     return False
-
 
 def download_pexels_photo(keywords, out_path):
     if not PEXELS_KEY: return False
     try:
-        for query in [keywords, "india news city"]:
+        for q in [keywords, "india news", "breaking news"]:
             r = _robust_get("https://api.pexels.com/v1/search",
                             headers={"Authorization": PEXELS_KEY},
-                            params={"query": query, "per_page": 3,
-                                    "orientation": "portrait"}, timeout=15)
-            photos = r.json().get("photos", [])
-            if not photos: continue
-            url  = photos[0]["src"].get("portrait") or photos[0]["src"].get("large", "")
-            resp = _robust_get(url, timeout=30)
-            if resp.status_code == 200:
-                img = Image.open(io.BytesIO(resp.content)).convert("RGB").resize((W, H), Image.LANCZOS)
-                img.save(out_path); return True
+                            params={"query": q, "per_page": 3,
+                                    "orientation": "landscape"}, timeout=15)
+            for ph in r.json().get("photos", []):
+                url  = ph["src"].get("large", "")
+                resp = _robust_get(url, timeout=30)
+                if resp.status_code == 200:
+                    with open(out_path, "wb") as f: f.write(resp.content)
+                    return True
     except Exception as e: print(f"  [Pexels photo] {e}")
     return False
-
 
 def download_pixabay_photo(keywords, out_path):
     if not PIXABAY_KEY: return False
     try:
-        for query in [keywords, "india city news"]:
+        for q in [keywords, "news", "india"]:
             r = _robust_get("https://pixabay.com/api/",
-                            params={"key": PIXABAY_KEY, "q": query,
-                                    "image_type": "photo", "per_page": 5,
-                                    "safesearch": "true",
-                                    "orientation": "vertical"}, timeout=15)
-            hits = r.json().get("hits", [])
-            if not hits: continue
-            url  = hits[0].get("largeImageURL") or hits[0].get("webformatURL", "")
-            resp = _robust_get(url, timeout=30)
-            if resp.status_code == 200:
-                img = Image.open(io.BytesIO(resp.content)).convert("RGB").resize((W, H), Image.LANCZOS)
-                img.save(out_path); return True
+                            params={"key": PIXABAY_KEY, "q": q,
+                                    "image_type": "photo", "per_page": 3,
+                                    "safesearch": "true"}, timeout=15)
+            for hit in r.json().get("hits", []):
+                url  = hit.get("webformatURL", "")
+                resp = _robust_get(url, timeout=30)
+                if resp.status_code == 200:
+                    with open(out_path, "wb") as f: f.write(resp.content)
+                    return True
     except Exception as e: print(f"  [Pixabay photo] {e}")
     return False
 
 
 # ===========================================================================
-# Text helpers
+# Text drawing helpers
 # ===========================================================================
 def tw(draw, text, font):
-    try:
-        b = draw.textbbox((0, 0), text, font=font); return b[2] - b[0]
-    except Exception:
-        return len(text) * max(getattr(font, "size", 12), 8)
+    try: return draw.textlength(text, font=font)
+    except: bbox = draw.textbbox((0,0), text, font=font); return bbox[2]-bbox[0]
 
 def th(draw, text, font):
-    try:
-        b = draw.textbbox((0, 0), text, font=font); return b[3] - b[1]
-    except Exception:
-        return max(getattr(font, "size", 12), 8) + 4
+    try: bbox = draw.textbbox((0,0), text, font=font); return bbox[3]-bbox[1]
+    except: return font.size
 
 def wrap_text(draw, text, font, max_w):
-    if not text.strip(): return []
     words, lines, cur = text.split(), [], ""
     for w in words:
         test = (cur + " " + w).strip()
-        if tw(draw, test, font) <= max_w: cur = test
+        if tw(draw, test, font) <= max_w:
+            cur = test
         else:
             if cur: lines.append(cur)
             cur = w
     if cur: lines.append(cur)
     return lines or [text]
 
-def shadow_text(draw, xy, text, font, fill=(255, 255, 255), sh=(0, 0, 0), off=2):
-    x, y = xy
-    for dx in [-off, 0, off]:
-        for dy in [-off, 0, off]:
-            if dx or dy: draw.text((x + dx, y + dy), text, font=font, fill=sh)
-    draw.text((x, y), text, font=font, fill=fill)
+def shadow_text(draw, xy, text, font, fill=(255,255,255), sh=(0,0,0), off=2):
+    draw.text((xy[0]+off, xy[1]+off), text, font=font, fill=sh)
+    draw.text(xy, text, font=font, fill=fill)
 
-def centre_shadow(draw, text, font, y, fill=(255, 255, 255)):
-    x = max(20, (W - tw(draw, text, font)) // 2)
+def centre_shadow(draw, text, font, y, fill=(255,255,255)):
+    w = tw(draw, text, font)
+    x = (W - w) // 2
     shadow_text(draw, (x, y), text, font, fill=fill)
 
-
-# ===========================================================================
-# C. Header topic -- Tamil if font OK, else clean English keywords
-# ===========================================================================
 def _header_topic(topic: str) -> str:
-    """Always returns English keywords for the header -- never Tamil script."""
-    import re
-    ascii_words = re.findall(r'[A-Za-z]{2,}', topic)
-    result = " ".join(ascii_words[:8])
-    return result.strip() if result.strip() else "Breaking News"
+    # Extract clean English keywords for header display
+    words = topic.split()
+    ascii_words = [w.strip(".,!?-:;()[]") for w in words
+                   if all(ord(c) < 128 for c in w) and len(w) > 2]
+    if len(ascii_words) >= 2:
+        return " ".join(ascii_words[:8])
+    # Fallback: return first 60 chars
+    return topic[:60]
 
-
-# ===========================================================================
-# B. News graphics -- lower-third caption, clean header
-# ===========================================================================
-# ===========================================================================
-# News banner fallback (shown when no topic image is available)
-# ===========================================================================
 def _draw_news_banner(draw, img, top_y, bottom_y, topic, font_topic):
-    """
-    Draw a professional news-style graphic banner with English topic text
-    when no photo is available. Looks like a real news channel graphic.
-    """
-    banner_h = bottom_y - top_y
-    for row in range(banner_h):
-        ratio = row / banner_h
-        r = int(5  + 15 * (1 - ratio))
-        g = int(10 + 20 * (1 - ratio))
-        b = int(60 + 40 * (1 - ratio))
-        draw.rectangle([0, top_y + row, img.width, top_y + row + 1], fill=(r, g, b))
-    draw.rectangle([0, top_y, 12, bottom_y], fill=(200, 20, 20))
-    draw.rectangle([0, top_y, img.width, top_y + 4], fill=(255, 255, 255))
-    try:
-        from PIL import ImageFont as _IF
-        lbl_font = _IF.truetype("/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf", 36)
-    except Exception:
-        lbl_font = font_topic
-    draw.rectangle([28, top_y + 30, 308, top_y + 80], fill=(180, 10, 10))
-    draw.text((38, top_y + 33), "LATEST NEWS", font=lbl_font, fill=(255, 255, 255))
-    eng_topic = topic_keywords(topic) or topic[:60]
-    words = eng_topic.upper().split()
-    mid = max(1, len(words) // 2)
-    lines = [' '.join(words[:mid]), ' '.join(words[mid:])]
-    ty = top_y + 110
-    for line in lines:
-        if line.strip():
-            shadow_text(draw, (28, ty), line, font_topic, fill=(255, 215, 0))
-            ty += 75
+    # Dark blue banner when no topic image available
+    draw.rectangle([0, top_y, W, bottom_y], fill=(5, 15, 70))
+    draw.rectangle([0, top_y, W, top_y + 6], fill=(200, 20, 20))
+    draw.rectangle([0, bottom_y - 6, W, bottom_y], fill=(200, 20, 20))
+    display = _header_topic(topic)
+    ty = top_y + 20
+    for line in wrap_text(draw, display[:100], font_topic, W - 60)[:3]:
+        shadow_text(draw, (24, ty), line, font_topic, fill=(255, 255, 255))
+        ty += 55
 
 
 # ===========================================================================
-# Fetch relevant topic image (cached per topic)
+# Image cache for topic images
 # ===========================================================================
 _IMG_CACHE = {}  # topic_key -> PIL Image or None
 
-def fetch_topic_image(topic: str):
+
+def topic_keywords(topic, description=""):
     """
-    Fetch a relevant photo for the topic using Pexels or Pixabay.
-    Returns PIL Image (RGB) sized to display, or None if unavailable.
+    Extract English search keywords from topic.
+    v9 fix: if topic is Tamil script (non-ASCII), use English description instead.
+    """
+    # Try to get ASCII words from topic title
+    words = [w.strip(".,!?-:;()[]") for w in topic.split()
+             if all(ord(c) < 128 for c in w) and len(w) > 3]
+    if len(words) >= 2:
+        return " ".join(words[:5])
+    # Fallback to English description (from RSS feed)
+    if description:
+        desc_words = [w.strip(".,!?-:;()[]") for w in description.split()
+                      if all(ord(c) < 128 for c in w) and len(w) > 3]
+        if desc_words:
+            return " ".join(desc_words[:5])
+    return "india news breaking today"
+
+
+def fetch_topic_image(topic: str, article_image_url: str = "", description: str = ""):
+    """
+    Fetch a relevant photo for the topic.
+    Priority order:
+      1. article_image_url (from RSS feed enclosure/media) - FREE, always relevant
+      2. Pexels API (needs PEXELS_KEY)
+      3. Pixabay API (needs PIXABAY_KEY)
+      4. Category-colored PIL image (always works, no API needed)
+    Returns PIL Image (RGB) or None.
     Cached so same topic doesn't re-fetch on every frame.
     """
     import hashlib, io as _io, urllib.request as _urllib
+
     key = hashlib.md5(topic.encode("utf-8")).hexdigest()
     if key in _IMG_CACHE:
         return _IMG_CACHE[key]
 
-    kw = topic_keywords(topic) or topic[:30]
+    kw = topic_keywords(topic, description) or topic[:30]
 
-    # Try Pexels
+    # Priority 1: article thumbnail from RSS
+    if article_image_url:
+        try:
+            data = _urllib.urlopen(article_image_url, timeout=10).read()
+            img  = Image.open(_io.BytesIO(data)).convert("RGB")
+            _IMG_CACHE[key] = img
+            print(f"  [TopicImg] RSS article image fetched")
+            return img
+        except Exception as e:
+            print(f"  [TopicImg RSS] {e}")
+
+    # Priority 2: Pexels
     if PEXELS_KEY:
         try:
             r = _robust_get(
@@ -586,12 +590,12 @@ def fetch_topic_image(topic: str):
                 data = _urllib.urlopen(img_url, timeout=10).read()
                 img = Image.open(_io.BytesIO(data)).convert("RGB")
                 _IMG_CACHE[key] = img
-                print(f"  [TopicImg] Pexels photo fetched for: {kw[:30]}")
+                print(f"  [TopicImg] Pexels photo for: {kw[:30]}")
                 return img
         except Exception as e:
             print(f"  [TopicImg Pexels] {e}")
 
-    # Try Pixabay fallback
+    # Priority 3: Pixabay
     if PIXABAY_KEY:
         try:
             r = _robust_get(
@@ -602,22 +606,50 @@ def fetch_topic_image(topic: str):
             )
             hits = r.json().get("hits", [])
             if hits:
-                img_url = hits[0]["webformatURL"]
+                img_url = hits[0].get("webformatURL", "")
                 data = _urllib.urlopen(img_url, timeout=10).read()
                 img = Image.open(_io.BytesIO(data)).convert("RGB")
                 _IMG_CACHE[key] = img
-                print(f"  [TopicImg] Pixabay photo fetched for: {kw[:30]}")
+                print(f"  [TopicImg] Pixabay photo for: {kw[:30]}")
                 return img
         except Exception as e:
             print(f"  [TopicImg Pixabay] {e}")
 
-    _IMG_CACHE[key] = None
-    return None
+    # Priority 4: Category-colored background (always works)
+    topic_lower = (topic + " " + description).lower()
+    if any(w in topic_lower for w in ["sport", "cricket", "football", "ipl", "match", "win"]):
+        color = (0, 80, 30)      # dark green - sports
+    elif any(w in topic_lower for w in ["weather", "rain", "flood", "cyclone", "storm"]):
+        color = (0, 40, 90)      # deep blue - weather
+    elif any(w in topic_lower for w in ["petrol", "price", "economy", "rupee", "bank", "finance"]):
+        color = (60, 30, 0)      # dark orange-brown - economy
+    elif any(w in topic_lower for w in ["politic", "election", "government", "minister", "party"]):
+        color = (60, 0, 0)       # dark red - politics
+    elif any(w in topic_lower for w in ["health", "hospital", "doctor", "covid", "disease"]):
+        color = (0, 60, 60)      # dark teal - health
+    elif any(w in topic_lower for w in ["film", "actor", "actress", "cinema", "movie", "kollywood"]):
+        color = (50, 0, 60)      # dark purple - entertainment
+    else:
+        color = (5, 15, 70)      # navy - general news
+
+    img = Image.new("RGB", (W, 400), color)
+    d   = ImageDraw.Draw(img)
+    # Draw subtle grid pattern to add texture
+    for x in range(0, W, 60):
+        d.line([(x, 0), (x, 400)], fill=tuple(min(255, c+8) for c in color), width=1)
+    for y in range(0, 400, 60):
+        d.line([(0, y), (W, y)], fill=tuple(min(255, c+8) for c in color), width=1)
+    _IMG_CACHE[key] = img
+    print(f"  [TopicImg] Using category color background: {color}")
+    return img
 
 
+# ===========================================================================
+# News graphics compositor
+# ===========================================================================
 def draw_news_graphics(bg_frame, topic, caption_text,
                         font_ch, font_topic, font_cap, font_ad, font_ad2,
-                        is_wav2lip=False):
+                        is_wav2lip=False, article_image_url="", description=""):
     try:
         img  = Image.fromarray(bg_frame.astype(np.uint8), "RGB")
         alpha = 40 if is_wav2lip else 100
@@ -625,38 +657,39 @@ def draw_news_graphics(bg_frame, topic, caption_text,
         img  = Image.alpha_composite(img.convert("RGBA"), ov).convert("RGB")
         draw = ImageDraw.Draw(img)
 
-        # ── TOP HEADER ───────────────────────────────────────────────────────
-        HEADER_H = 145   # channel name bar height
-        IMG_H    = 400   # relevant image zone height below header
-        IMG_TOP  = HEADER_H
-        TOPIC_TOP = IMG_TOP + IMG_H  # topic bar starts below image
+        # Layout constants
+        HEADER_H  = 145   # channel name bar height
+        IMG_H     = 400   # relevant image zone height below header
+        IMG_TOP   = HEADER_H
+        TOPIC_TOP = IMG_TOP + IMG_H
 
+        # --- TOP HEADER ---
         draw.rectangle([0, 0, W, HEADER_H], fill=(5, 15, 70))
         draw.rectangle([0, HEADER_H - 2, W, HEADER_H + 6], fill=(200, 20, 20))
-        shadow_text(draw, (28, 16), CHANNEL,         font_ch,  fill=(255, 255, 255))
-        shadow_text(draw, (28, 82), "BREAKING NEWS", font_ad2, fill=(255, 60,  60))
+        shadow_text(draw, (28, 16),  CHANNEL,         font_ch,  fill=(255, 255, 255))
+        shadow_text(draw, (28, 82),  "BREAKING NEWS", font_ad2, fill=(255, 60,  60))
 
-        # ── RELEVANT TOPIC IMAGE ZONE (below channel bar, top area) ──────────
-        topic_img = fetch_topic_image(topic)
+        # --- RELEVANT TOPIC IMAGE ZONE ---
+        topic_img = fetch_topic_image(topic, article_image_url, description)
         if topic_img:
             try:
                 tw_i, th_i = topic_img.size
-                scale_i = W / tw_i
+                scale_i    = W / tw_i
                 nw_i = W
                 nh_i = int(th_i * scale_i)
                 img_resized = topic_img.resize((nw_i, nh_i), Image.LANCZOS)
-                crop_top = max(0, (nh_i - IMG_H) // 2)
+                crop_top    = max(0, (nh_i - IMG_H) // 2)
                 img_cropped = img_resized.crop((0, crop_top, nw_i, crop_top + IMG_H))
                 img.paste(img_cropped, (0, IMG_TOP))
                 draw = ImageDraw.Draw(img)
-                print(f"  [TopicImg] Displayed image in header zone")
+                print(f"  [TopicImg] Displayed in header zone")
             except Exception as e:
                 print(f"  [TopicImg draw] {e}")
                 _draw_news_banner(draw, img, IMG_TOP, TOPIC_TOP, topic, font_topic)
         else:
             _draw_news_banner(draw, img, IMG_TOP, TOPIC_TOP, topic, font_topic)
 
-        # ── TOPIC BAR (positioned below the relevant image) ──────────────────
+        # --- TOPIC BAR ---
         draw.rectangle([0, TOPIC_TOP, W, TOPIC_TOP + 144], fill=(0, 0, 0, 210))
         draw.rectangle([0, TOPIC_TOP, 8, TOPIC_TOP + 144], fill=(200, 20, 20))
         display_topic = _header_topic(topic)
@@ -665,28 +698,23 @@ def draw_news_graphics(bg_frame, topic, caption_text,
             shadow_text(draw, (24, ty), line, font_topic, fill=(255, 215, 0))
             ty += 60
 
-        # ── B. LOWER-THIRD CAPTION (72%–92% of frame height) ─────────────────
+        # --- LOWER-THIRD CAPTION ---
         if caption_text.strip():
             zone_top    = int(H * CAPTION_TOP_PCT)
             zone_bottom = int(H * CAPTION_BOTTOM_PCT)
             zone_h      = zone_bottom - zone_top
-
-            cap_lines = wrap_text(draw, caption_text, font_cap, W - 80)[:4]
-            lh        = th(draw, "A", font_cap) + 16
-            total_h   = len(cap_lines) * lh
-            pad       = 20
-
-            cy = zone_top + max(0, (zone_h - total_h) // 2)
-
-            draw.rectangle([0, cy - pad, W, cy + total_h + pad],
-                           fill=(0, 0, 0, 185))
-            draw.rectangle([0, cy - pad, 8, cy + total_h + pad],
-                           fill=(255, 215, 0))
+            cap_lines   = wrap_text(draw, caption_text, font_cap, W - 80)[:4]
+            lh          = th(draw, "A", font_cap) + 16
+            total_h     = len(cap_lines) * lh
+            pad         = 20
+            cy          = zone_top + max(0, (zone_h - total_h) // 2)
+            draw.rectangle([0, cy - pad, W, cy + total_h + pad], fill=(0, 0, 0, 185))
+            draw.rectangle([0, cy - pad, 8, cy + total_h + pad], fill=(255, 215, 0))
             for line in cap_lines:
                 centre_shadow(draw, line, font_cap, cy, fill=(255, 255, 255))
                 cy += lh
 
-        # ── FOOTER AD ────────────────────────────────────────────────────────
+        # --- FOOTER ---
         ft = H - 165
         draw.rectangle([0, ft, W, H],    fill=(175, 8, 8))
         draw.rectangle([0, ft, W, ft+4], fill=(255, 215, 0))
@@ -708,60 +736,61 @@ _SKIP_MARKERS    = {"HASHTAGS", "CAPTION", "FORMAT", "RULES", "TAGS", "NOTE", "N
 def extract_spoken(script_text: str) -> str:
     spoken = []
     skip   = False
-    for raw_line in script_text.split("\n"):
+    for raw_line in script_text.splitlines():
         line = raw_line.strip()
-        if not line: continue
-        if set(line).issubset(set("-=_*# \t")): continue
-        if line.startswith("#"): continue
-        if line.startswith("[") and line.endswith("]"): continue
+        if not line:
+            continue
         upper = line.upper()
-        if any(kw in upper for kw in _SKIP_MARKERS): skip = True; continue
-        bare  = line.rstrip(":").strip().upper()
-        if bare in _SECTION_MARKERS: skip = False; continue
-        ci = line.find(":")
-        if ci > 0:
-            prefix = line[:ci].strip().upper()
-            if prefix in _SECTION_MARKERS:
-                skip = False
-                rem  = line[ci + 1:].strip()
-                if rem: spoken.append(rem)
-                continue
-        if skip: continue
-        if line.isupper() and len(line.split()) <= 4: continue
+        if any(upper.startswith(m) for m in _SKIP_MARKERS):
+            skip = True; continue
+        if any(upper.startswith(m) for m in _SECTION_MARKERS):
+            skip = False; continue
+        if skip:
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            continue
+        if line.startswith("#"):
+            continue
+        if line.startswith("---"):
+            continue
         spoken.append(line)
-    return " ".join(spoken).strip()
+    result = " ".join(spoken).strip()
+    if not result:
+        # Fallback: return all non-empty, non-marker lines
+        result = " ".join(
+            l.strip() for l in script_text.splitlines()
+            if l.strip() and not l.strip().startswith("#")
+               and not l.strip().startswith("[")
+        )
+    return result
 
 
 # ===========================================================================
-# Gradient fallback
+# Utilities
 # ===========================================================================
 def gradient_frame(t):
-    p  = int(8 * np.sin(t * 0.7))
-    a  = np.zeros((H, W, 3), dtype=np.uint8)
-    ys = np.arange(H, dtype=np.float32) / H
-    a[:, :, 0] = np.clip(10 + (ys * 20).astype(int) + p,     0, 255)[:, None]
-    a[:, :, 1] = np.clip(10 + (ys * 15).astype(int),          0, 255)[:, None]
-    a[:, :, 2] = np.clip(50 + (ys * 80).astype(int) + p * 2,  0, 255)[:, None]
-    return a
+    frame = np.zeros((H, W, 3), dtype=np.uint8)
+    shift = int(20 * math.sin(2 * math.pi * t / 8))
+    for y in range(H):
+        r = int(max(0, min(255, 5  + shift + 10 * y / H)))
+        g = int(max(0, min(255, 15 + shift +  8 * y / H)))
+        b = int(max(0, min(255, 70 + shift + 20 * y / H)))
+        frame[y, :] = [r, g, b]
+    return frame
 
-
-# ===========================================================================
-# Helpers
-# ===========================================================================
 def split_segs(text, n):
+    if n <= 1:
+        return [text]
     words = text.split()
-    if not words: return [""] * n
+    if not words:
+        return [text] * n
     chunk = max(1, len(words) // n)
     segs  = []
     for i in range(n):
-        s = i * chunk
-        e = s + chunk if i < n - 1 else len(words)
-        segs.append(" ".join(words[s:e]))
+        start = i * chunk
+        end   = start + chunk if i < n - 1 else len(words)
+        segs.append(" ".join(words[start:end]))
     return segs
-
-def topic_keywords(topic):
-    words = [w for w in topic.split() if all(ord(c) < 128 for c in w) and len(w) > 2]
-    return " ".join(words[:4]) if words else "news breaking india city"
 
 def load_existing_manifest(path):
     if os.path.exists(path):
@@ -784,7 +813,8 @@ def save_manifest(path, videos):
 # Main video builder
 # ===========================================================================
 def create_news_video(audio_path, spoken_text, topic, output_path,
-                      anchor_face=None, bg_video_path=None, bg_photo_path=None):
+                      anchor_face=None, bg_video_path=None, bg_photo_path=None,
+                      article_image_url="", description=""):
     from moviepy.editor import (VideoClip, AudioFileClip,
                                  VideoFileClip, concatenate_videoclips)
 
@@ -802,11 +832,11 @@ def create_news_video(audio_path, spoken_text, topic, output_path,
     font_ad    = load_font(52)
     font_ad2   = load_font(38)
 
-    # ── STEP 1: SadTalker -> real body+head animated video ───────────────────
+    # STEP 1: SadTalker -> real body+head animated video
     st_out_dir = output_path.replace('.mp4', '_sadtalker')
     st_video   = run_sadtalker(anchor_face, audio_path, st_out_dir)
 
-    # ── STEP 2: Wav2Lip -> lip sync on top of SadTalker (or raw face) ────────
+    # STEP 2: Wav2Lip -> lip sync on top of SadTalker (or raw face)
     wl_path    = output_path.replace('.mp4', '_wl.mp4')
     wl_input   = st_video if st_video else anchor_face
     wl_success = run_wav2lip(wl_input, audio_path, wl_path)
@@ -830,9 +860,15 @@ def create_news_video(audio_path, spoken_text, topic, output_path,
         except Exception as e:
             print(f"  [Clip load] {e}"); wl_clip = None
 
-    # ── Background fallback ───────────────────────────────────────────────────
-    bg_clip = bg_photo = None
+    # STEP 3: HeadAnimator fallback (synthetic natural movement)
+    head_animator = None
     if wl_clip is None:
+        print("  [HeadAnimator] Using synthetic head/body movement")
+        head_animator = HeadAnimator(anchor_face, duration)
+
+    # Background fallback (only used if no AI face at all)
+    bg_clip = bg_photo = None
+    if wl_clip is None and head_animator is None:
         if bg_video_path and os.path.exists(bg_video_path):
             try:
                 raw = VideoFileClip(bg_video_path)
@@ -850,8 +886,6 @@ def create_news_video(audio_path, spoken_text, topic, output_path,
                 bg_photo = np.array(
                     Image.open(bg_photo_path).convert("RGB").resize((W, H), Image.LANCZOS))
             except Exception as e: print(f"  [BG photo] {e}")
-        if bg_clip is None and bg_photo is None:
-            print("  [BG] Using animated gradient")
 
     def make_frame(t):
         try:
@@ -860,6 +894,9 @@ def create_news_video(audio_path, spoken_text, topic, output_path,
                 if frame.shape[:2] != (H, W):
                     frame = np.array(Image.fromarray(frame).resize((W, H), Image.LANCZOS))
                 is_wl = True
+            elif head_animator is not None:
+                frame = head_animator.get_frame(t)
+                is_wl = False
             elif bg_clip is not None:
                 frame = bg_clip.get_frame(t)
                 if frame.shape[:2] != (H, W):
@@ -877,7 +914,9 @@ def create_news_video(audio_path, spoken_text, topic, output_path,
         return draw_news_graphics(
             frame, topic, segments[seg_idx],
             font_ch, font_topic, font_cap, font_ad, font_ad2,
-            is_wav2lip=is_wl
+            is_wav2lip=is_wl,
+            article_image_url=article_image_url,
+            description=description
         )
 
     clip  = VideoClip(make_frame, duration=duration)
@@ -907,20 +946,15 @@ def main():
     st_ok = os.path.exists(SADTALKER_SCRIPT)
     wl_ok = os.path.exists(WAV2LIP_CHECKPOINT)
 
-    print("Tamil News Video Creator v8  (SadTalker + Wav2Lip)")
+    print("Tamil News Video Creator v9  (SadTalker + Wav2Lip + HeadAnimator)")
     print(f"Time            : {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print(f"PEXELS_API_KEY  : {'SET' if PEXELS_KEY  else 'NOT SET'}")
     print(f"PIXABAY_API_KEY : {'SET' if PIXABAY_KEY else 'NOT SET'}")
     print(f"SadTalker       : {'INSTALLED' if st_ok else 'NOT FOUND'}")
     print(f"Wav2Lip         : {'INSTALLED' if wl_ok else 'NOT FOUND'}")
+    print(f"HeadAnimator    : ALWAYS AVAILABLE (synthetic fallback)")
+    print(f"SADTALKER_TIMEOUT: {SADTALKER_TIMEOUT}s per video")
     print(f"ANCHOR SRC      : {'user PNG' if os.path.exists(SUPPLIED_ANCHOR_PNG) else 'API download'}")
-
-    if not st_ok:
-        print("\n  [!] SadTalker missing. Install commands:")
-        print("      git clone https://github.com/OpenTalker/SadTalker /tmp/SadTalker")
-        print("      cd /tmp/SadTalker && pip install -r requirements.txt")
-        print("      bash scripts/download_models.sh")
-        print("  [!] Will fall back to Wav2Lip-only (lips only, no body)\n")
 
     try:
         r = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True, timeout=10)
@@ -953,7 +987,10 @@ def main():
     created_videos  = list(existing_videos)
 
     for i, (script_data, audio_data) in enumerate(zip(scripts_data, audio_files), 1):
-        topic = script_data.get("topic", f"News {i}")
+        topic       = script_data.get("topic", f"News {i}")
+        description = script_data.get("description", "")
+        img_url     = script_data.get("article_image_url", "")
+
         print(f"\n{'='*60}")
         print(f"Video {i}/{len(scripts_data)}: {topic[:60]}")
         print(f"{'='*60}")
@@ -966,14 +1003,14 @@ def main():
         if not spoken_text.strip():
             spoken_text = topic
 
-        keywords    = topic_keywords(topic)
+        keywords    = topic_keywords(topic, description)
         timestamp   = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = os.path.join(VIDEO_DIR, f"reel_{i}_{timestamp}.mp4")
 
         if output_path in existing_paths:
             print("  SKIP: already in manifest"); continue
 
-        # Only fetch BG assets if both AI models are unavailable
+        # BG assets only when both AI models unavailable
         final_vid = final_photo = None
         if not st_ok and not wl_ok:
             bg_vid_path    = os.path.join(ASSETS_DIR, f"bg_video_{i}.mp4")
@@ -995,9 +1032,11 @@ def main():
         try:
             success = create_news_video(
                 audio_path, spoken_text, topic, output_path,
-                anchor_face   = anchor_face,
-                bg_video_path = final_vid,
-                bg_photo_path = final_photo,
+                anchor_face        = anchor_face,
+                bg_video_path      = final_vid,
+                bg_photo_path      = final_photo,
+                article_image_url  = img_url,
+                description        = description,
             )
             if success and os.path.exists(output_path):
                 sz = os.path.getsize(output_path) / 1e6
