@@ -53,7 +53,7 @@ SADTALKER_DIR        = "/tmp/SadTalker"
 SADTALKER_SCRIPT     = os.path.join(SADTALKER_DIR, "inference.py")
 SADTALKER_CHECKPOINT = os.path.join(SADTALKER_DIR, "checkpoints")
 WAV2LIP_DIR          = "/tmp/Wav2Lip"
-WAV2LIP_CHECKPOINT   = os.path.join(WAV2LIP_DIR, "checkpoints/wav2lip.pth")
+WAV2LIP_CHECKPOINT   = os.path.join(WAV2LIP_DIR, "checkpoints/wav2lip_gan.pth")
 
 CAPTION_TOP_PCT    = 0.72
 CAPTION_BOTTOM_PCT = 0.92
@@ -772,9 +772,19 @@ def create_news_video(audio_path, spoken_text, topic, output_path,
     def make_frame(t):
         try:
             if wl_clip is not None:
-                frame = wl_clip.get_frame(t)
-                if frame.shape[:2] != (H,W):
-                    frame = np.array(Image.fromarray(frame).resize((W,H),Image.LANCZOS))
+                wl_frame = wl_clip.get_frame(t)
+                # Place anchor in body area on navy background
+                body_y1 = HEADER_H
+                body_y2 = int(H * CAPTION_TOP_PCT)
+                body_h  = body_y2 - body_y1
+                frame   = np.full((H, W, 3), (5, 15, 70), dtype=np.uint8)
+                ah, aw  = wl_frame.shape[:2]
+                scale   = min(body_h / ah, W / aw, 1.5)
+                nw, nh  = int(aw * scale), int(ah * scale)
+                resized = np.array(Image.fromarray(wl_frame.astype(np.uint8)).resize((nw, nh), Image.LANCZOS))
+                px = (W - nw) // 2
+                py = body_y1 + (body_h - nh) // 2
+                frame[py:py+nh, px:px+nw] = resized
                 is_wl = True
             elif bg_clip is not None:
                 frame = bg_clip.get_frame(t)
