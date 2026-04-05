@@ -24,40 +24,42 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y fonts-noto fonts-noto-cjk
 
+      - name: Install PyTorch (CPU, pinned)
+        run: |
+          pip install torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 --index-url https://download.pytorch.org/whl/cpu
+
       - name: Install Python dependencies
         run: |
           pip install --upgrade pip
+          pip install -r tamil-news-bot-github_3/tamil-news-bot/requirements.txt --no-deps || \
           pip install -r tamil-news-bot-github_3/tamil-news-bot/requirements.txt
 
-      - name: Install Wav2Lip dependencies
+      - name: Install Wav2Lip extra dependencies
         run: |
-          pip install torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 --index-url https://download.pytorch.org/whl/cpu
-          pip install opencv-python-headless==4.8.1.78
-          pip install librosa==0.10.1 numba==0.58.1
-          pip install batch-face
+          pip install opencv-python-headless==4.8.1.78 || pip install opencv-python-headless
+          pip install librosa==0.10.1 numba==0.58.1 batch-face
 
       - name: Patch basicsr degradations (torchvision compat fix)
         run: |
-          DEGRADATIONS=$(python -c "import basicsr, os; print(os.path.join(os.path.dirname(basicsr.__file__), 'data', 'degradations.py'))")
+          DEGRADATIONS=$(python -c "import basicsr, os; print(os.path.join(os.path.dirname(basicsr.__file__), 'data', 'degradations.py'))" 2>/dev/null || echo "")
           if [ -f "$DEGRADATIONS" ]; then
             sed -i 's/from torchvision.transforms.functional_tensor import rgb_to_grayscale/from torchvision.transforms.functional import rgb_to_grayscale/' "$DEGRADATIONS"
-            echo "basicsr patch OK"
+            echo "basicsr patch OK: $DEGRADATIONS"
           else
-            echo "basicsr degradations.py not found - skipping"
+            echo "basicsr degradations.py not found - skipping patch"
           fi
 
       - name: Install SadTalker dependencies
         run: |
-          pip install face_alignment==1.3.5
-          pip install gfpgan==1.3.8
-          pip install kornia==0.6.12
+          pip install face_alignment==1.3.5 || pip install face_alignment
+          pip install gfpgan==1.3.8 || pip install gfpgan
+          pip install kornia==0.6.12 || pip install kornia
           pip install yacs pyyaml joblib scikit-image einops
 
       - name: Clone SadTalker and download checkpoints
         run: |
           git clone https://github.com/OpenTalker/SadTalker.git /tmp/SadTalker
-          mkdir -p /tmp/SadTalker/checkpoints
-          mkdir -p /tmp/SadTalker/gfpgan/weights
+          mkdir -p /tmp/SadTalker/checkpoints /tmp/SadTalker/gfpgan/weights
           wget -q -O /tmp/SadTalker/checkpoints/SadTalker_V0.0.2_256.safetensors \
             "https://github.com/OpenTalker/SadTalker/releases/download/v0.0.2-rc/SadTalker_V0.0.2_256.safetensors"
           wget -q -O /tmp/SadTalker/checkpoints/mapping_00229-model.pth.tar \
