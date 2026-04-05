@@ -1,13 +1,14 @@
 """
-STEP 4: Tamil News Video Creator (v13)
+STEP 4: Tamil News Video Creator (v14)
 =======================================
-Pipeline: SadTalker (head+body movement) → Wav2Lip fallback
-- NO background images (solid dark news background)
-- Anchor face with realistic head & body movement (SadTalker)
-- Tamil captions + header + footer overlay
+- SadTalker: lip sync + head & body movements
+- Wav2Lip fallback
+- Audio volume boosted 2x
+- Captions in lower third (above footer)
+- Dark navy background
 """
 
-import json, os, io, sys, time, subprocess, glob, numpy as np
+import json, os, sys, time, subprocess, glob, numpy as np
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
 
@@ -21,12 +22,12 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-SCRIPTS_DIR         = os.path.dirname(__file__)
-SCRIPTS_FILE        = os.path.join(SCRIPTS_DIR, "../output/scripts.json")
-AUDIO_DIR           = os.path.join(SCRIPTS_DIR, "../output/audio")
-VIDEO_DIR           = os.path.join(SCRIPTS_DIR, "../output/videos")
-ASSETS_DIR          = os.path.join(SCRIPTS_DIR, "../assets")
-SUPPLIED_ANCHOR     = os.path.join(SCRIPTS_DIR, "anchor_face_supplied.png")
+SCRIPTS_DIR     = os.path.dirname(__file__)
+SCRIPTS_FILE    = os.path.join(SCRIPTS_DIR, "../output/scripts.json")
+AUDIO_DIR       = os.path.join(SCRIPTS_DIR, "../output/audio")
+VIDEO_DIR       = os.path.join(SCRIPTS_DIR, "../output/videos")
+ASSETS_DIR      = os.path.join(SCRIPTS_DIR, "../assets")
+SUPPLIED_ANCHOR = os.path.join(SCRIPTS_DIR, "anchor_face_supplied.png")
 
 W, H   = 1080, 1920
 FPS    = 25
@@ -35,32 +36,28 @@ AD_LINE1 = "Coimbatore Veedu Builders"
 AD_LINE2 = "Contact: 8111024877"
 CHANNEL  = "Tamil News Live"
 
-# SadTalker
-SADTALKER_DIR = os.environ.get("SADTALKER_DIR", "/tmp/SadTalker")
+VOLUME_BOOST = 2.0   # multiply audio volume
 
-# Wav2Lip fallback
+SADTALKER_DIR      = os.environ.get("SADTALKER_DIR", "/tmp/SadTalker")
 WAV2LIP_DIR        = os.environ.get("WAV2LIP_DIR", "/tmp/Wav2Lip")
 WAV2LIP_CHECKPOINT = os.path.join(WAV2LIP_DIR, "checkpoints/wav2lip_gan.pth")
 
-HEADER_H = 170
-FOOTER_H = 160
+HEADER_H       = 170
+FOOTER_H       = 160
+LOWER_THIRD_H  = 240   # caption bar height above footer
 
 
 # ===========================================================================
-# Solid dark news background (no external API)
+# Dark background
 # ===========================================================================
 def make_bg():
-    """Create a solid dark-blue news background as numpy array."""
     a = np.zeros((H, W, 3), dtype=np.uint8)
-    # Dark navy base
     a[:, :, 0] = 8
     a[:, :, 1] = 12
     a[:, :, 2] = 45
-    # Subtle vignette — brighter in centre
-    cx, cy = W // 2, H // 2
+    cy = H // 2
     for y in range(0, H, 4):
-        dist = abs(y - cy) / cy
-        boost = int(15 * (1 - dist))
+        boost = int(15 * (1 - abs(y - cy) / cy))
         a[y, :, 2] = np.clip(45 + boost, 0, 80)
     return a
 
@@ -93,9 +90,7 @@ def load_font(size, tamil=False):
                 return f
             except Exception:
                 continue
-    f = ImageFont.load_default()
-    _font_cache[key] = f
-    return f
+    return ImageFont.load_default()
 
 def txt_w(draw, text, font):
     try:
@@ -141,7 +136,7 @@ def wrap_text(draw, text, font, max_w):
 
 
 # ===========================================================================
-# News overlay (header + topic + captions + footer)
+# News overlay
 # ===========================================================================
 def draw_overlay(base_arr, topic, caption_text):
     img  = Image.fromarray(base_arr.astype(np.uint8), "RGB")
@@ -150,17 +145,17 @@ def draw_overlay(base_arr, topic, caption_text):
     f_channel  = load_font(52)
     f_breaking = load_font(38)
     f_topic    = load_font(44)
-    f_cap      = load_font(56, tamil=True)
-    f_ad       = load_font(50)
-    f_ad2      = load_font(36)
+    f_cap      = load_font(52, tamil=True)
+    f_ad       = load_font(48)
+    f_ad2      = load_font(34)
 
-    # Header bar
+    # ── Header bar ──────────────────────────────────────────
     draw.rectangle([0, 0, W, HEADER_H], fill=(5, 15, 70))
     draw.rectangle([0, HEADER_H - 6, W, HEADER_H], fill=(200, 20, 20))
     shadow_text(draw, (30, 14),  CHANNEL,        f_channel,  fill=(255, 255, 255))
     shadow_text(draw, (30, 100), "BREAKING NEWS", f_breaking, fill=(255, 60, 60))
 
-    # Topic strip
+    # ── Topic strip ─────────────────────────────────────────
     topic_y = HEADER_H + 4
     draw.rectangle([0, topic_y, W, topic_y + 120], fill=(0, 0, 0, 210))
     ty = topic_y + 10
@@ -168,75 +163,71 @@ def draw_overlay(base_arr, topic, caption_text):
         shadow_text(draw, (30, ty), line, f_topic, fill=(255, 215, 0))
         ty += 58
 
-    # Tamil captions (centre of frame)
+    # ── LOWER THIRD captions (above footer) ─────────────────
     if caption_text and caption_text.strip():
-        cap_lines = wrap_text(draw, caption_text, f_cap, W - 80)[:4]
-        lh        = txt_h(draw, "A", f_cap) + 18
-        total_h   = len(cap_lines) * lh
-        cy        = (H - total_h) // 2 + 80
-        pad       = 24
-        box       = Image.new("RGBA", (W - 40, total_h + pad * 2), (0, 0, 0, 180))
-        img_rgba  = img.convert("RGBA")
-        img_rgba.paste(box, (20, cy - pad), box)
+        lt_top = H - FOOTER_H - LOWER_THIRD_H   # y start of lower third
+
+        # Red left accent bar
+        draw.rectangle([0, lt_top, 12, H - FOOTER_H], fill=(220, 20, 20))
+
+        # Semi-transparent dark background for lower third
+        lt_bg = Image.new("RGBA", (W, LOWER_THIRD_H), (0, 0, 0, 200))
+        img_rgba = img.convert("RGBA")
+        img_rgba.paste(lt_bg, (0, lt_top), lt_bg)
         img  = img_rgba.convert("RGB")
         draw = ImageDraw.Draw(img)
+
+        # Thin gold top border on lower third
+        draw.rectangle([0, lt_top, W, lt_top + 5], fill=(255, 200, 0))
+
+        cap_lines = wrap_text(draw, caption_text, f_cap, W - 80)[:3]
+        lh        = txt_h(draw, "A", f_cap) + 14
+        total_h   = len(cap_lines) * lh
+        cy        = lt_top + (LOWER_THIRD_H - total_h) // 2 + 5
+
         for line in cap_lines:
             centre_shadow(draw, line, f_cap, cy, fill=(255, 255, 255))
             cy += lh
 
-    # Footer ad
+    # ── Footer ad ────────────────────────────────────────────
     ft = H - FOOTER_H
     draw.rectangle([0, ft, W, H],      fill=(175, 8, 8))
     draw.rectangle([0, ft, W, ft + 5], fill=(255, 215, 0))
-    centre_shadow(draw, AD_LINE1, f_ad,  ft + 18, fill=(255, 255, 255))
-    centre_shadow(draw, AD_LINE2, f_ad2, ft + 90, fill=(255, 230, 0))
+    centre_shadow(draw, AD_LINE1, f_ad,  ft + 16, fill=(255, 255, 255))
+    centre_shadow(draw, AD_LINE2, f_ad2, ft + 88, fill=(255, 230, 0))
 
     return np.array(img)
 
 
 # ===========================================================================
-# Composite anchor video onto background frame
+# Composite anchor onto background (lower 70%)
 # ===========================================================================
 def composite_anchor(bg_arr, anchor_frame):
-    """
-    Place anchor video (from SadTalker/Wav2Lip) in the lower 70% of frame.
-    Anchor is centred horizontally.
-    """
     bg  = Image.fromarray(bg_arr.astype(np.uint8), "RGB")
     anc = Image.fromarray(anchor_frame.astype(np.uint8), "RGB")
-
-    # Target anchor size: full width, 70% height
-    anc_h = int(H * 0.70)
-    anc_w = W
-    anc   = anc.resize((anc_w, anc_h), Image.LANCZOS)
-
-    # Paste at bottom
+    anc_h = int(H * 0.72)
+    anc   = anc.resize((W, anc_h), Image.LANCZOS)
     bg.paste(anc, (0, H - anc_h))
     return np.array(bg)
 
 
 # ===========================================================================
-# SadTalker — head + body movement + lip sync
+# SadTalker — lip sync + head & body movement
 # ===========================================================================
 def sadtalker_available():
     inf = os.path.join(SADTALKER_DIR, "inference.py")
     ok  = os.path.exists(inf)
-    print(f"  [SadTalker] inference.py: {inf} -> {ok}")
+    print(f"  [SadTalker] {inf} -> {ok}")
     return ok
 
-
 def run_sadtalker(face_path, audio_path, output_dir):
-    """
-    Runs SadTalker. Returns path to output .mp4 or None.
-    """
     if not sadtalker_available():
         return None
     if not face_path or not os.path.exists(face_path):
         print(f"  [SadTalker] Face missing: {face_path}")
         return None
 
-    # Convert audio to 16kHz WAV
-    wav_path = audio_path.rsplit(".", 1)[0] + "_16k.wav"
+    wav_path = audio_path.rsplit(".", 1)[0] + "_16k_st.wav"
     conv = subprocess.run(
         ["ffmpeg", "-y", "-i", audio_path, "-ar", "16000", "-ac", "1", wav_path],
         capture_output=True, text=True, timeout=60
@@ -249,16 +240,15 @@ def run_sadtalker(face_path, audio_path, output_dir):
 
     cmd = [
         sys.executable, "inference.py",
-        "--driven_audio",  wav_path,
-        "--source_image",  face_path,
-        "--result_dir",    output_dir,
+        "--driven_audio", wav_path,
+        "--source_image", face_path,
+        "--result_dir",   output_dir,
         "--cpu",
-        # No --still → enables natural head & body movement
-        "--preprocess",    "full",   # full body (not just face crop)
-        "--size",          "256",
+        "--preprocess",   "full",    # full body movement
+        "--size",         "256",
+        # NO --still → enables natural head & body movement
     ]
-    print(f"  [SadTalker] Running (CPU, head+body movement)...")
-    print(f"  [SadTalker] CMD: {' '.join(cmd)}")
+    print(f"  [SadTalker] Running lip sync + head/body movement (CPU)...")
     try:
         proc = subprocess.run(
             cmd, cwd=SADTALKER_DIR,
@@ -269,14 +259,11 @@ def run_sadtalker(face_path, audio_path, output_dir):
             print(f"  [SadTalker] rc={proc.returncode}")
             if proc.stderr: print("  [ST ERR]", proc.stderr[-600:])
             return None
-
-        # Find the output mp4
         mp4s = sorted(glob.glob(os.path.join(output_dir, "**/*.mp4"), recursive=True))
         if mp4s:
-            out = mp4s[-1]
-            sz  = os.path.getsize(out) / 1024 / 1024
-            print(f"  [SadTalker] SUCCESS: {out} ({sz:.1f} MB)")
-            return out
+            sz = os.path.getsize(mp4s[-1]) / 1024 / 1024
+            print(f"  [SadTalker] SUCCESS: {mp4s[-1]} ({sz:.1f} MB)")
+            return mp4s[-1]
         print("  [SadTalker] No output mp4 found")
         return None
     except subprocess.TimeoutExpired:
@@ -288,21 +275,19 @@ def run_sadtalker(face_path, audio_path, output_dir):
 
 
 # ===========================================================================
-# Wav2Lip fallback
+# Wav2Lip fallback — lip sync only
 # ===========================================================================
 def wav2lip_available():
     ok = (os.path.exists(WAV2LIP_CHECKPOINT) and
           os.path.exists(os.path.join(WAV2LIP_DIR, "inference.py")))
-    print(f"  [Wav2Lip] checkpoint={os.path.exists(WAV2LIP_CHECKPOINT)}, inference={os.path.exists(os.path.join(WAV2LIP_DIR,'inference.py'))}")
+    print(f"  [Wav2Lip] ckpt={os.path.exists(WAV2LIP_CHECKPOINT)} inference={os.path.exists(os.path.join(WAV2LIP_DIR,'inference.py'))}")
     return ok
-
 
 def run_wav2lip(face_path, audio_path, output_path):
     if not wav2lip_available():
         return False
     if not face_path or not os.path.exists(face_path):
         return False
-
     wav_path = audio_path.rsplit(".", 1)[0] + "_16k_wl.wav"
     conv = subprocess.run(
         ["ffmpeg", "-y", "-i", audio_path, "-ar", "16000", "-ac", "1", wav_path],
@@ -311,17 +296,16 @@ def run_wav2lip(face_path, audio_path, output_path):
     if conv.returncode != 0:
         print(f"  [Wav2Lip] ffmpeg failed: {conv.stderr[:200]}")
         return False
-
     cmd = [
         sys.executable, "inference.py",
         "--checkpoint_path", WAV2LIP_CHECKPOINT,
-        "--face",   face_path,
-        "--audio",  wav_path,
+        "--face",    face_path,
+        "--audio",   wav_path,
         "--outfile", output_path,
         "--resize_factor", "1",
         "--nosmooth",
     ]
-    print(f"  [Wav2Lip] Running lip sync (CPU, no head movement)...")
+    print(f"  [Wav2Lip] Running lip sync (CPU)...")
     try:
         proc = subprocess.run(
             cmd, cwd=WAV2LIP_DIR,
@@ -345,16 +329,6 @@ def run_wav2lip(face_path, audio_path, output_path):
 
 
 # ===========================================================================
-# Static anchor fallback (no lip sync, just the image)
-# ===========================================================================
-def static_anchor_frame(face_path):
-    """Return the anchor image as a numpy array (used when both methods fail)."""
-    if face_path and os.path.exists(face_path):
-        return np.array(Image.open(face_path).convert("RGB"))
-    return None
-
-
-# ===========================================================================
 # Helpers
 # ===========================================================================
 def extract_spoken(script_text):
@@ -362,22 +336,19 @@ def extract_spoken(script_text):
     skip_kw = ["HASHTAGS", "CAPTION", "FORMAT", "RULES", "TAGS"]
     for line in script_text.split("\n"):
         line = line.strip()
-        if not line:
-            continue
+        if not line: continue
         if any(k in line.upper() for k in skip_kw):
             skip = True; continue
         if line.startswith(("HOOK", "STORY", "CTA", "TRUTH")):
             skip = False; continue
-        if skip or line.startswith(("[", "---", "#")):
-            continue
+        if skip or line.startswith(("[", "---", "#")): continue
         if not line.isupper():
             spoken.append(line)
     return " ".join(spoken)
 
 def split_captions(text, n):
     words = text.split()
-    if not words:
-        return [""] * n
+    if not words: return [""] * n
     chunk = max(1, len(words) // n)
     segs  = []
     for i in range(n):
@@ -391,43 +362,41 @@ def split_captions(text, n):
 # Build one video
 # ===========================================================================
 def build_video(audio_path, spoken_text, topic, output_path, anchor_face):
-    audio    = AudioFileClip(audio_path)
+    # ── Load & boost audio ──────────────────────────────────
+    audio    = AudioFileClip(audio_path).volumex(VOLUME_BOOST)
     duration = audio.duration
-    print(f"  Duration: {duration:.1f}s")
+    print(f"  Duration: {duration:.1f}s  |  Volume: {VOLUME_BOOST}x")
 
     n_segs   = max(1, int(duration / 4))
     segments = split_captions(spoken_text or topic, n_segs)
     seg_dur  = duration / n_segs
 
-    # Solid dark background
     bg_arr = make_bg()
 
-    # ------- Try SadTalker first (head + body movement) -------
-    st_dir = os.path.join("/tmp", f"st_out_{os.path.basename(output_path)}")
-    st_mp4 = run_sadtalker(anchor_face, audio_path, st_dir)
+    # ── Try SadTalker first ──────────────────────────────────
+    st_dir      = f"/tmp/st_{os.path.splitext(os.path.basename(output_path))[0]}"
+    st_mp4      = run_sadtalker(anchor_face, audio_path, st_dir)
     anchor_clip = None
-    method = "static"
+    method      = "static"
 
     if st_mp4:
         try:
             anchor_clip = VideoFileClip(st_mp4)
-            # Loop if shorter than audio
             if anchor_clip.duration < duration - 0.5:
                 loops = int(duration / anchor_clip.duration) + 2
                 anchor_clip = concatenate_videoclips([anchor_clip] * loops)
             anchor_clip = anchor_clip.subclip(0, duration)
             method = "sadtalker"
-            print(f"  [SadTalker] Clip loaded: {anchor_clip.w}x{anchor_clip.h}")
+            print(f"  [SadTalker] Clip: {anchor_clip.w}x{anchor_clip.h}")
         except Exception as e:
             print(f"  [SadTalker] Clip load error: {e}")
             anchor_clip = None
 
-    # ------- Fallback: Wav2Lip -------
+    # ── Fallback: Wav2Lip ────────────────────────────────────
     if anchor_clip is None:
         print("  SadTalker failed → trying Wav2Lip...")
         wl_out = output_path.replace(".mp4", "_wl_raw.mp4")
-        wl_ok  = run_wav2lip(anchor_face, audio_path, wl_out)
-        if wl_ok:
+        if run_wav2lip(anchor_face, audio_path, wl_out):
             try:
                 raw = VideoFileClip(wl_out)
                 if raw.duration < duration - 0.5:
@@ -435,16 +404,16 @@ def build_video(audio_path, spoken_text, topic, output_path, anchor_face):
                     raw   = concatenate_videoclips([raw] * loops)
                 anchor_clip = raw.subclip(0, duration)
                 method = "wav2lip"
-                print(f"  [Wav2Lip] Clip loaded: {anchor_clip.w}x{anchor_clip.h}")
+                print(f"  [Wav2Lip] Clip: {anchor_clip.w}x{anchor_clip.h}")
             except Exception as e:
                 print(f"  [Wav2Lip] Clip load error: {e}")
                 anchor_clip = None
 
-    # ------- Fallback: static image -------
+    # ── Fallback: static image ───────────────────────────────
     static_arr = None
-    if anchor_clip is None:
-        print("  Both failed → using static anchor image")
-        static_arr = static_anchor_frame(anchor_face)
+    if anchor_clip is None and anchor_face and os.path.exists(anchor_face):
+        print("  Both failed → static image")
+        static_arr = np.array(Image.open(anchor_face).convert("RGB"))
 
     print(f"  Method: {method}")
 
@@ -458,9 +427,8 @@ def build_video(audio_path, spoken_text, topic, output_path, anchor_face):
             else:
                 frame = bg_arr.copy()
 
-            seg_idx     = min(int(t / seg_dur), n_segs - 1)
-            caption_now = segments[seg_idx]
-            return draw_overlay(frame, topic, caption_now)
+            seg_idx = min(int(t / seg_dur), n_segs - 1)
+            return draw_overlay(frame, topic, segments[seg_idx])
         except Exception as e:
             print(f"  make_frame err t={t:.1f}: {e}")
             return draw_overlay(bg_arr.copy(), topic, "")
@@ -475,13 +443,14 @@ def build_video(audio_path, spoken_text, topic, output_path, anchor_face):
     )
     audio.close()
     final.close()
-    if anchor_clip:
-        anchor_clip.close()
+    if anchor_clip: anchor_clip.close()
 
     # Cleanup temp files
-    for tmp in [output_path.replace(".mp4", "_wl_raw.mp4"),
-                audio_path.rsplit(".", 1)[0] + "_16k.wav",
-                audio_path.rsplit(".", 1)[0] + "_16k_wl.wav"]:
+    for tmp in [
+        output_path.replace(".mp4", "_wl_raw.mp4"),
+        audio_path.rsplit(".", 1)[0] + "_16k_st.wav",
+        audio_path.rsplit(".", 1)[0] + "_16k_wl.wav",
+    ]:
         if os.path.exists(tmp):
             try: os.remove(tmp)
             except: pass
@@ -499,13 +468,14 @@ def build_video(audio_path, spoken_text, topic, output_path, anchor_face):
 # ===========================================================================
 def main():
     print("=" * 65)
-    print("Tamil News Video Creator v13")
-    print("Pipeline: SadTalker (head+body) → Wav2Lip → static")
+    print("Tamil News Video Creator v14")
+    print("SadTalker lip sync + head/body movement | Volume 2x | Lower third")
     print("=" * 65)
     print(f"Time         : {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print(f"Anchor       : {SUPPLIED_ANCHOR} -> {os.path.exists(SUPPLIED_ANCHOR)}")
     print(f"SadTalker    : {SADTALKER_DIR} -> {os.path.exists(os.path.join(SADTALKER_DIR,'inference.py'))}")
     print(f"Wav2Lip ckpt : {WAV2LIP_CHECKPOINT} -> {os.path.exists(WAV2LIP_CHECKPOINT)}")
+    print(f"Volume boost : {VOLUME_BOOST}x")
 
     os.makedirs(VIDEO_DIR,  exist_ok=True)
     os.makedirs(ASSETS_DIR, exist_ok=True)
@@ -514,7 +484,7 @@ def main():
         with open(SCRIPTS_FILE, "r", encoding="utf-8") as f:
             scripts_data = json.load(f)["scripts"]
     except FileNotFoundError:
-        print(f"ERROR: scripts.json not found: {SCRIPTS_FILE}")
+        print(f"ERROR: {SCRIPTS_FILE} not found")
         sys.exit(1)
 
     try:
@@ -528,7 +498,7 @@ def main():
 
     anchor_face = SUPPLIED_ANCHOR if os.path.exists(SUPPLIED_ANCHOR) else None
     if not anchor_face:
-        print("WARNING: anchor_face_supplied.png missing — lip sync will be skipped!")
+        print("WARNING: anchor_face_supplied.png not found!")
 
     created = []
 
@@ -555,8 +525,8 @@ def main():
                     "topic":      topic,
                     "video_file": output_path,
                     "size_mb":    round(sz, 1),
+                    "method":     "sadtalker/wav2lip",
                 })
-                print(f"  ADDED: {output_path}")
             else:
                 print(f"  FAILED: {topic}")
         except Exception as e:
@@ -564,8 +534,7 @@ def main():
             print(f"  EXCEPTION: {e}")
             traceback.print_exc()
 
-    manifest_path = os.path.join(VIDEO_DIR, "manifest.json")
-    with open(manifest_path, "w", encoding="utf-8") as f:
+    with open(os.path.join(VIDEO_DIR, "manifest.json"), "w", encoding="utf-8") as f:
         json.dump({
             "videos":     created,
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
