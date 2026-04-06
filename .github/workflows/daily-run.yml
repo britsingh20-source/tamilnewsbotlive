@@ -24,7 +24,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y fonts-noto fonts-noto-cjk ffmpeg libsndfile1
 
-      - name: Install PyTorch CPU (pinned - fixes torchvision compat)
+      - name: Install PyTorch CPU
         run: |
           pip install torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 \
             --index-url https://download.pytorch.org/whl/cpu
@@ -40,8 +40,7 @@ jobs:
 
       - name: Install Wav2Lip dependencies
         run: |
-          pip install batch-face
-          pip install resampy
+          pip install batch-face resampy
 
       - name: Install SadTalker dependencies
         run: |
@@ -51,14 +50,14 @@ jobs:
           pip install yacs pyyaml joblib scikit-image einops safetensors
           pip install huggingface_hub
 
-      - name: Patch basicsr degradations (torchvision compat fix)
+      - name: Patch basicsr
         run: |
           DEGRADATIONS=$(python -c "import basicsr, os; print(os.path.join(os.path.dirname(basicsr.__file__), 'data', 'degradations.py'))" 2>/dev/null || echo "")
           if [ -f "$DEGRADATIONS" ]; then
             sed -i 's/from torchvision.transforms.functional_tensor import rgb_to_grayscale/from torchvision.transforms.functional import rgb_to_grayscale/' "$DEGRADATIONS"
             echo "basicsr patch OK"
           else
-            echo "basicsr not found or already patched - OK"
+            echo "basicsr not found - OK"
           fi
 
       - name: Clone SadTalker and download checkpoints
@@ -66,7 +65,7 @@ jobs:
           git clone https://github.com/OpenTalker/SadTalker.git /tmp/SadTalker
           mkdir -p /tmp/SadTalker/checkpoints/BFM_Fitting /tmp/SadTalker/gfpgan/weights
 
-          echo "=== Main model checkpoints ==="
+          echo "=== Main checkpoints ==="
           wget -q -O /tmp/SadTalker/checkpoints/SadTalker_V0.0.2_256.safetensors \
             "https://github.com/OpenTalker/SadTalker/releases/download/v0.0.2-rc/SadTalker_V0.0.2_256.safetensors"
           wget -q -O /tmp/SadTalker/checkpoints/mapping_00229-model.pth.tar \
@@ -74,39 +73,17 @@ jobs:
           wget -q -O /tmp/SadTalker/checkpoints/mapping_00109-model.pth.tar \
             "https://github.com/OpenTalker/SadTalker/releases/download/v0.0.2-rc/mapping_00109-model.pth.tar"
 
-          echo "=== BFM Fitting files from HuggingFace (ROOT CAUSE FIX) ==="
-          python3 - <<'PYEOF'
-from huggingface_hub import hf_hub_download
-import os, shutil
-os.makedirs('/tmp/SadTalker/checkpoints/BFM_Fitting', exist_ok=True)
-bfm_files = [
-    'checkpoints/BFM_Fitting/01_MorphableModel.mat',
-    'checkpoints/BFM_Fitting/BFM09_model_info.mat',
-    'checkpoints/BFM_Fitting/BFM_model_front.mat',
-    'checkpoints/BFM_Fitting/Exp_Pca.bin',
-    'checkpoints/BFM_Fitting/facemodel_info.mat',
-    'checkpoints/BFM_Fitting/select_vertex_id.mat',
-    'checkpoints/BFM_Fitting/similarity_Lm3D_all.mat',
-    'checkpoints/BFM_Fitting/std_exp.txt',
-]
-for f in bfm_files:
-    try:
-        local = hf_hub_download(repo_id='vinthony/SadTalker', filename=f)
-        fname = os.path.basename(f)
-        dest = f'/tmp/SadTalker/checkpoints/BFM_Fitting/{fname}'
-        shutil.copy2(local, dest)
-        print(f'OK: {fname} ({os.path.getsize(dest)} bytes)')
-    except Exception as e:
-        print(f'FAIL: {f}: {e}')
-PYEOF
+          echo "=== BFM Fitting files (via wget from HuggingFace) ==="
+          BASE="https://huggingface.co/vinthony/SadTalker/resolve/main/checkpoints/BFM_Fitting"
+          for f in 01_MorphableModel.mat BFM09_model_info.mat BFM_model_front.mat Exp_Pca.bin facemodel_info.mat select_vertex_id.mat similarity_Lm3D_all.mat std_exp.txt; do
+            wget -q -O /tmp/SadTalker/checkpoints/BFM_Fitting/$f "$BASE/$f" && echo "OK: $f" || echo "FAIL: $f"
+          done
 
-          echo "=== GFPGAN weights ==="
+          echo "=== GFPGAN ==="
           wget -q -O /tmp/SadTalker/gfpgan/weights/GFPGANv1.4.pth \
             "https://github.com/TencentARC/GFPGAN/releases/download/v1.3.4/GFPGANv1.4.pth"
 
-          echo "=== Verify BFM files ==="
-          ls -lh /tmp/SadTalker/checkpoints/BFM_Fitting/
-          echo "BFM file count: $(ls /tmp/SadTalker/checkpoints/BFM_Fitting/ | wc -l)"
+          echo "=== BFM count: $(ls /tmp/SadTalker/checkpoints/BFM_Fitting/ | wc -l) files ==="
 
       - name: Clone Wav2Lip and download checkpoint
         run: |
@@ -118,12 +95,10 @@ PYEOF
       - name: Verify setup
         run: |
           python -c "import torch; print('torch', torch.__version__)"
-          python -c "import torchvision; print('torchvision', torchvision.__version__)"
           python -c "import face_alignment; print('face_alignment OK')" || echo "face_alignment WARN"
-          python -c "import gfpgan; print('gfpgan OK')" || echo "gfpgan WARN"
           ls /tmp/SadTalker/inference.py && echo "SadTalker OK" || echo "SadTalker MISSING"
-          ls /tmp/SadTalker/checkpoints/BFM_Fitting/BFM_model_front.mat && echo "BFM OK" || echo "BFM MISSING <<<< ERROR"
-          ls /tmp/Wav2Lip/checkpoints/wav2lip_gan.pth && echo "Wav2Lip checkpoint OK" || echo "Wav2Lip MISSING"
+          ls /tmp/SadTalker/checkpoints/BFM_Fitting/BFM_model_front.mat && echo "BFM OK" || echo "BFM MISSING ERROR"
+          ls /tmp/Wav2Lip/checkpoints/wav2lip_gan.pth && echo "Wav2Lip OK" || echo "Wav2Lip MISSING"
 
       - name: Create output folders
         run: |
@@ -156,7 +131,7 @@ PYEOF
           name: tamil-news-videos-${{ github.run_number }}
           path: tamil-news-bot-github_3/tamil-news-bot/output/videos/
           retention-days: 7
-          if-no-files-found: warn
+          if-no-files-found: ignore
 
       - name: Upload logs
         if: always()
@@ -165,4 +140,4 @@ PYEOF
           name: tamil-news-logs-${{ github.run_number }}
           path: tamil-news-bot-github_3/tamil-news-bot/logs/
           retention-days: 7
-          if-no-files-found: warn
+          if-no-files-found: ignore
