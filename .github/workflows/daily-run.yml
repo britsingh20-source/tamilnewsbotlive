@@ -74,22 +74,18 @@ jobs:
             "https://github.com/OpenTalker/SadTalker/releases/download/v0.0.2-rc/mapping_00109-model.pth.tar"
 
           echo "=== BFM Fitting files (via huggingface_hub) ==="
-          python - <<'PYEOF'
-from huggingface_hub import hf_hub_download
-import shutil
-files = [
-  '01_MorphableModel.mat', 'BFM09_model_info.mat', 'BFM_model_front.mat',
-  'Exp_Pca.bin', 'facemodel_info.mat', 'select_vertex_id.mat',
-  'similarity_Lm3D_all.mat', 'std_exp.txt'
-]
-for f in files:
-    try:
-        p = hf_hub_download(repo_id='vinthony/SadTalker', filename=f'checkpoints/BFM_Fitting/{f}')
-        shutil.copy(p, f'/tmp/SadTalker/checkpoints/BFM_Fitting/{f}')
-        print(f'OK: {f}')
-    except Exception as e:
-        print(f'FAIL: {f} - {e}')
-PYEOF
+          python -c "
+          from huggingface_hub import hf_hub_download
+          import shutil
+          files = ['01_MorphableModel.mat','BFM09_model_info.mat','BFM_model_front.mat','Exp_Pca.bin','facemodel_info.mat','select_vertex_id.mat','similarity_Lm3D_all.mat','std_exp.txt']
+          for f in files:
+              try:
+                  p = hf_hub_download(repo_id='vinthony/SadTalker', filename='checkpoints/BFM_Fitting/' + f)
+                  shutil.copy(p, '/tmp/SadTalker/checkpoints/BFM_Fitting/' + f)
+                  print('OK: ' + f)
+              except Exception as e:
+                  print('FAIL: ' + f + ' - ' + str(e))
+          "
 
           echo "=== GFPGAN ==="
           wget -q -O /tmp/SadTalker/gfpgan/weights/GFPGANv1.4.pth \
