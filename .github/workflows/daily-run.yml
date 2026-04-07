@@ -71,38 +71,42 @@ jobs:
           wget -q -O /tmp/SadTalker/checkpoints/mapping_00109-model.pth.tar \
             "https://github.com/OpenTalker/SadTalker/releases/download/v0.0.2-rc/mapping_00109-model.pth.tar"
 
-          echo "=== BFM Fitting files (official OpenTalker HF repo) ==="
-          python - <<'PYEOF'
-          import os, shutil
-          from huggingface_hub import hf_hub_download
+          echo "=== BFM Fitting files (direct wget from known public URLs) ==="
+          cd /tmp/SadTalker/checkpoints/BFM_Fitting
 
-          REPO = "OpenTalker/SadTalker"
-          DEST = "/tmp/SadTalker/checkpoints/BFM_Fitting"
-          os.makedirs(DEST, exist_ok=True)
+          wget -q -O 01_MorphableModel.mat \
+            "https://github.com/JiauZhang/DragGAN/releases/download/v0.0.1/01_MorphableModel.mat" \
+            || echo "WARN: 01_MorphableModel.mat failed"
 
-          BFM_FILES = [
-              "BFM_Fitting/01_MorphableModel.mat",
-              "BFM_Fitting/BFM09_model_info.mat",
-              "BFM_Fitting/BFM_model_front.mat",
-              "BFM_Fitting/Exp_Pca.bin",
-              "BFM_Fitting/facemodel_info.mat",
-              "BFM_Fitting/select_vertex_id.mat",
-              "BFM_Fitting/similarity_Lm3D_all.mat",
-              "BFM_Fitting/std_exp.txt",
-          ]
+          wget -q -O BFM09_model_info.mat \
+            "https://github.com/ascust/BDMM/raw/master/BFM/BFM09_model_info.mat" \
+            || echo "WARN: BFM09_model_info.mat failed"
 
-          ok = 0
-          for f in BFM_FILES:
-              try:
-                  path = hf_hub_download(repo_id=REPO, filename=f)
-                  dst = os.path.join(DEST, os.path.basename(f))
-                  shutil.copy(path, dst)
-                  print(f"OK  {f}")
-                  ok += 1
-              except Exception as e:
-                  print(f"FAIL {f}: {e}")
-          print(f"BFM downloaded: {ok} / {len(BFM_FILES)}")
-          PYEOF
+          wget -q -O BFM_model_front.mat \
+            "https://github.com/ascust/BDMM/raw/master/BFM/BFM_model_front.mat" \
+            || echo "WARN: BFM_model_front.mat failed"
+
+          BASE="https://raw.githubusercontent.com/YadiraF/face3d/master/examples/Data/BFM/Out"
+          wget -q -O Exp_Pca.bin             "${BASE}/Exp_Pca.bin"             || echo "WARN: Exp_Pca.bin failed"
+          wget -q -O facemodel_info.mat      "${BASE}/facemodel_info.mat"      || echo "WARN: facemodel_info.mat failed"
+          wget -q -O select_vertex_id.mat    "${BASE}/select_vertex_id.mat"    || echo "WARN: select_vertex_id.mat failed"
+          wget -q -O similarity_Lm3D_all.mat "${BASE}/similarity_Lm3D_all.mat" || echo "WARN: similarity_Lm3D_all.mat failed"
+          wget -q -O std_exp.txt             "${BASE}/std_exp.txt"             || echo "WARN: std_exp.txt failed"
+
+          echo "=== BFM count: $(ls /tmp/SadTalker/checkpoints/BFM_Fitting/ | wc -l) / 8 files ==="
+          ls -lh /tmp/SadTalker/checkpoints/BFM_Fitting/
+
+          echo "=== Patch SadTalker: np.float/int/bool → native Python types ==="
+          find /tmp/SadTalker -name "*.py" -exec \
+            sed -i \
+              -e 's/np\.float\b/float/g' \
+              -e 's/np\.int\b/int/g' \
+              -e 's/np\.complex\b/complex/g' \
+              -e 's/np\.bool\b/bool/g' \
+              -e 's/np\.object\b/object/g' \
+              -e 's/np\.str\b/str/g' \
+            {} +
+          echo "np.float patch applied"
 
           echo "=== Pre-download facexlib models ==="
           wget -q -O /tmp/SadTalker/gfpgan/weights/alignment_WFLW_4HG.pth \
@@ -112,8 +116,6 @@ jobs:
           wget -q -O /tmp/SadTalker/gfpgan/weights/GFPGANv1.4.pth \
             "https://github.com/TencentARC/GFPGAN/releases/download/v1.3.4/GFPGANv1.4.pth"
 
-          echo "=== BFM count: $(ls /tmp/SadTalker/checkpoints/BFM_Fitting/ | wc -l) files ==="
-
       - name: Clone Wav2Lip and download checkpoint
         run: |
           git clone https://github.com/Rudrabha/Wav2Lip.git /tmp/Wav2Lip
@@ -122,11 +124,9 @@ jobs:
             "https://huggingface.co/numz/wav2lip_studio/resolve/main/Wav2lip/wav2lip_gan.pth"
 
           echo "=== Patch Wav2Lip audio.py for librosa >= 0.10 ==="
-          # Covers hp.* variant (actual Wav2Lip code)
           sed -i \
             's/librosa\.filters\.mel(hp\.sample_rate, hp\.n_fft,/librosa.filters.mel(sr=hp.sample_rate, n_fft=hp.n_fft,/g' \
             /tmp/Wav2Lip/audio.py
-          # Covers hparams.* variant (safety net)
           sed -i \
             's/librosa\.filters\.mel(hparams\.sample_rate, hparams\.n_fft,/librosa.filters.mel(sr=hparams.sample_rate, n_fft=hparams.n_fft,/g' \
             /tmp/Wav2Lip/audio.py
