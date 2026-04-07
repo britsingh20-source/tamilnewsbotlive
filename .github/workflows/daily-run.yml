@@ -71,72 +71,49 @@ jobs:
           wget -q -O /tmp/SadTalker/checkpoints/mapping_00109-model.pth.tar \
             "https://github.com/OpenTalker/SadTalker/releases/download/v0.0.2-rc/mapping_00109-model.pth.tar"
 
-          echo "=== BFM Fitting files ==="
-          python -c "
+          echo "=== BFM Fitting files (official OpenTalker HF repo) ==="
+          python - <<'PYEOF'
           import os, shutil
           from huggingface_hub import hf_hub_download
 
-          dest = '/tmp/SadTalker/checkpoints/BFM_Fitting'
-          os.makedirs(dest, exist_ok=True)
+          REPO = "OpenTalker/SadTalker"
+          DEST = "/tmp/SadTalker/checkpoints/BFM_Fitting"
+          os.makedirs(DEST, exist_ok=True)
 
           BFM_FILES = [
-              '01_MorphableModel.mat',
-              'BFM09_model_info.mat',
-              'BFM_model_front.mat',
-              'Exp_Pca.bin',
-              'facemodel_info.mat',
-              'select_vertex_id.mat',
-              'similarity_Lm3D_all.mat',
-              'std_exp.txt',
+              "BFM_Fitting/01_MorphableModel.mat",
+              "BFM_Fitting/BFM09_model_info.mat",
+              "BFM_Fitting/BFM_model_front.mat",
+              "BFM_Fitting/Exp_Pca.bin",
+              "BFM_Fitting/facemodel_info.mat",
+              "BFM_Fitting/select_vertex_id.mat",
+              "BFM_Fitting/similarity_Lm3D_all.mat",
+              "BFM_Fitting/std_exp.txt",
           ]
 
           ok = 0
           for f in BFM_FILES:
-              for repo, base in [
-                  ('barisaydin/sadtalker', 'checkpoints/BFM_Fitting/'),
-                  ('vinthony/SadTalker',   'checkpoints/BFM_Fitting/'),
-              ]:
-                  try:
-                      p = hf_hub_download(repo_id=repo, filename=base + f)
-                      shutil.copy(p, os.path.join(dest, f))
-                      print('OK:', f, 'from', repo)
-                      ok += 1
-                      break
-                  except Exception as e:
-                      print('FAIL', repo, f, str(e)[:80])
-          print('BFM downloaded:', ok, '/', len(BFM_FILES))
-          "
-
-          echo "=== gdown fallback for any missing BFM files ==="
-          declare -A GDRIVE
-          GDRIVE[01_MorphableModel.mat]="1ewy3ql6KQ-HgL0rJpTBVaqANBdLECgqo"
-          GDRIVE[BFM09_model_info.mat]="1MHUeFSoneFkGiQzl01GnBfqMiNAqaAqV"
-          GDRIVE[BFM_model_front.mat]="1yOSH37e4GLRZ93_L3AhFSPdMVJGCMBJO"
-          GDRIVE[Exp_Pca.bin]="1sLKy_XaSInK9N-2CDmIv9MxupUBsFaQz"
-          GDRIVE[facemodel_info.mat]="1OzHpbJJnMC5C0CeXhd0sNf9BeBJsWDq4"
-          GDRIVE[select_vertex_id.mat]="1b2GVUOeKFcFm1IVCl1UIqFpSGiT_MakD"
-          GDRIVE[similarity_Lm3D_all.mat]="1aRidBP3aFfQhGpX2LXhijSAJvgR0r9oS"
-          GDRIVE[std_exp.txt]="1kDYQFQvFDEsHBYuR_OfImzv0DKH3BQIF"
-          for fname in "${!GDRIVE[@]}"; do
-            target="/tmp/SadTalker/checkpoints/BFM_Fitting/$fname"
-            if [ ! -f "$target" ] || [ ! -s "$target" ]; then
-              echo "gdown fallback: $fname"
-              gdown --fuzzy "https://drive.google.com/file/d/${GDRIVE[$fname]}/view" \
-                -O "$target" || echo "gdown also failed for $fname"
-            fi
-          done
+              try:
+                  path = hf_hub_download(repo_id=REPO, filename=f)
+                  dst = os.path.join(DEST, os.path.basename(f))
+                  shutil.copy(path, dst)
+                  print(f"OK  {f}")
+                  ok += 1
+              except Exception as e:
+                  print(f"FAIL {f}: {e}")
+          print(f"BFM downloaded: {ok} / {len(BFM_FILES)}")
+          PYEOF
 
           echo "=== Pre-download facexlib models ==="
           wget -q -O /tmp/SadTalker/gfpgan/weights/alignment_WFLW_4HG.pth \
             "https://github.com/xinntao/facexlib/releases/download/v0.1.0/alignment_WFLW_4HG.pth"
           wget -q -O /tmp/SadTalker/gfpgan/weights/detection_Resnet50_Final.pth \
             "https://github.com/xinntao/facexlib/releases/download/v0.1.0/detection_Resnet50_Final.pth"
-
-          echo "=== GFPGAN ==="
           wget -q -O /tmp/SadTalker/gfpgan/weights/GFPGANv1.4.pth \
             "https://github.com/TencentARC/GFPGAN/releases/download/v1.3.4/GFPGANv1.4.pth"
 
           echo "=== BFM count: $(ls /tmp/SadTalker/checkpoints/BFM_Fitting/ | wc -l) files ==="
+
       - name: Clone Wav2Lip and download checkpoint
         run: |
           git clone https://github.com/Rudrabha/Wav2Lip.git /tmp/Wav2Lip
@@ -145,8 +122,16 @@ jobs:
             "https://huggingface.co/numz/wav2lip_studio/resolve/main/Wav2lip/wav2lip_gan.pth"
 
           echo "=== Patch Wav2Lip audio.py for librosa >= 0.10 ==="
-          sed -i 's/librosa\.filters\.mel(hparams\.sample_rate, hparams\.n_fft,/librosa.filters.mel(sr=hparams.sample_rate, n_fft=hparams.n_fft,/g' /tmp/Wav2Lip/audio.py
-          echo "audio.py patched: $(grep 'filters.mel' /tmp/Wav2Lip/audio.py)"
+          # Covers hp.* variant (actual Wav2Lip code)
+          sed -i \
+            's/librosa\.filters\.mel(hp\.sample_rate, hp\.n_fft,/librosa.filters.mel(sr=hp.sample_rate, n_fft=hp.n_fft,/g' \
+            /tmp/Wav2Lip/audio.py
+          # Covers hparams.* variant (safety net)
+          sed -i \
+            's/librosa\.filters\.mel(hparams\.sample_rate, hparams\.n_fft,/librosa.filters.mel(sr=hparams.sample_rate, n_fft=hparams.n_fft,/g' \
+            /tmp/Wav2Lip/audio.py
+          echo "audio.py after patch:"
+          grep 'filters.mel' /tmp/Wav2Lip/audio.py
 
       - name: Verify setup
         run: |
