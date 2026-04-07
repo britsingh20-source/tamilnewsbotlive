@@ -1,15 +1,12 @@
 name: Tamil News Bot - Daily Run
-
 on:
   schedule:
     - cron: "30 1 * * *"
   workflow_dispatch:
-
 jobs:
   run-bot:
     runs-on: ubuntu-latest
     timeout-minutes: 180
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -22,7 +19,8 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y fonts-noto fonts-noto-cjk ffmpeg libsndfile1
+          sudo apt-get install -y fonts-noto fonts-noto-cjk ffmpeg libsndfile1 \
+            libsm6 libxext6 libgl1
 
       - name: Install PyTorch CPU
         run: |
@@ -48,7 +46,7 @@ jobs:
           pip install gfpgan==1.3.8 || pip install gfpgan
           pip install kornia==0.6.12 || pip install kornia
           pip install yacs pyyaml joblib scikit-image einops safetensors
-          pip install huggingface_hub
+          pip install huggingface_hub gdown
 
       - name: Patch basicsr
         run: |
@@ -73,19 +71,18 @@ jobs:
           wget -q -O /tmp/SadTalker/checkpoints/mapping_00109-model.pth.tar \
             "https://github.com/OpenTalker/SadTalker/releases/download/v0.0.2-rc/mapping_00109-model.pth.tar"
 
-          echo "=== BFM Fitting files (via huggingface_hub) ==="
-          python -c "
-          from huggingface_hub import hf_hub_download
-          import shutil
-          files = ['01_MorphableModel.mat','BFM09_model_info.mat','BFM_model_front.mat','Exp_Pca.bin','facemodel_info.mat','select_vertex_id.mat','similarity_Lm3D_all.mat','std_exp.txt']
-          for f in files:
-              try:
-                  p = hf_hub_download(repo_id='vinthony/SadTalker', filename='checkpoints/BFM_Fitting/' + f)
-                  shutil.copy(p, '/tmp/SadTalker/checkpoints/BFM_Fitting/' + f)
-                  print('OK: ' + f)
-              except Exception as e:
-                  print('FAIL: ' + f + ' - ' + str(e))
-          "
+          echo "=== BFM Fitting files via gdown (Google Drive) ==="
+          gdown --id 1GhJMqzMGQYb7iVTMCiMgIr83_1RCi_Ek -O /tmp/BFM_Fitting.zip
+          unzip -q /tmp/BFM_Fitting.zip -d /tmp/bfm_temp/
+          cp -r /tmp/bfm_temp/BFM_Fitting/. /tmp/SadTalker/checkpoints/BFM_Fitting/ 2>/dev/null || \
+            cp -r /tmp/bfm_temp/. /tmp/SadTalker/checkpoints/BFM_Fitting/
+          echo "BFM files: $(ls /tmp/SadTalker/checkpoints/BFM_Fitting/ | wc -l)"
+
+          echo "=== Pre-download facexlib models ==="
+          wget -q -O /tmp/SadTalker/gfpgan/weights/alignment_WFLW_4HG.pth \
+            "https://github.com/xinntao/facexlib/releases/download/v0.1.0/alignment_WFLW_4HG.pth"
+          wget -q -O /tmp/SadTalker/gfpgan/weights/detection_Resnet50_Final.pth \
+            "https://github.com/xinntao/facexlib/releases/download/v0.1.0/detection_Resnet50_Final.pth"
 
           echo "=== GFPGAN ==="
           wget -q -O /tmp/SadTalker/gfpgan/weights/GFPGANv1.4.pth \
@@ -99,6 +96,10 @@ jobs:
           mkdir -p /tmp/Wav2Lip/checkpoints
           wget -q -O /tmp/Wav2Lip/checkpoints/wav2lip_gan.pth \
             "https://huggingface.co/numz/wav2lip_studio/resolve/main/Wav2lip/wav2lip_gan.pth"
+
+          echo "=== Patch Wav2Lip audio.py for librosa >= 0.10 ==="
+          sed -i 's/librosa\.filters\.mel(hparams\.sample_rate, hparams\.n_fft,/librosa.filters.mel(sr=hparams.sample_rate, n_fft=hparams.n_fft,/g' /tmp/Wav2Lip/audio.py
+          echo "audio.py patched: $(grep 'filters.mel' /tmp/Wav2Lip/audio.py)"
 
       - name: Verify setup
         run: |
