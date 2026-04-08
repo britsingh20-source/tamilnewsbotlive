@@ -1,16 +1,17 @@
 """
-STEP 4: Tamil News Video Creator (v14)
+STEP 4: Tamil News Video Creator (v15)
 =======================================
 - SadTalker: lip sync + head & body movements
 - Wav2Lip fallback
 - Audio volume boosted 2x
 - Captions in lower third (above footer)
 - Dark navy background
+- News image in header right panel (Pexels fetch)
 """
 
-import json, os, sys, time, subprocess, glob, numpy as np
+import json, os, sys, time, subprocess, glob, numpy as np, requests, io
 from datetime import datetime
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 
 try:
     from moviepy.editor import (VideoClip, AudioFileClip,
@@ -36,15 +37,99 @@ AD_LINE1 = "Coimbatore Veedu Builders"
 AD_LINE2 = "Contact: 8111024877"
 CHANNEL  = "Tamil News Live"
 
-VOLUME_BOOST = 2.0   # multiply audio volume
+VOLUME_BOOST = 2.0
 
 SADTALKER_DIR      = os.environ.get("SADTALKER_DIR", "/tmp/SadTalker")
 WAV2LIP_DIR        = os.environ.get("WAV2LIP_DIR", "/tmp/Wav2Lip")
 WAV2LIP_CHECKPOINT = os.path.join(WAV2LIP_DIR, "checkpoints/wav2lip_gan.pth")
+PEXELS_API_KEY     = os.environ.get("PEXELS_API_KEY", "")
 
-HEADER_H       = 170
+HEADER_H       = 300   # taller to fit image
 FOOTER_H       = 160
-LOWER_THIRD_H  = 240   # caption bar height above footer
+LOWER_THIRD_H  = 240
+
+# Header layout
+IMG_PANEL_W    = 580   # right panel width for news image
+TEXT_PANEL_W   = W - IMG_PANEL_W  # left panel = 500px
+
+
+# ===========================================================================
+# Fetch news image from Pexels
+# ===========================================================================
+def fetch_news_image(topic: str, width: int, height: int) -> Image.Image | None:
+    """Fetch a relevant image from Pexels for the given topic."""
+    if not PEXELS_API_KEY:
+        print("  [Image] No PEXELS_API_KEY — skipping image fetch")
+        return None
+
+    # Extract English-friendly keywords from topic (strip Tamil, keep short words)
+    import re
+    # Try to pull out any English words from topic, fallback to generic news terms
+    en_words = re.findall(r'[A-Za-z]{3,}', topic)
+    if en_words:
+        query = " ".join(en_words[:4])
+    else:
+        query = "breaking news"
+
+    print(f"  [Image] Pexels query: '{query}'")
+
+    try:
+        resp = requests.get(
+            "https://api.pexels.com/v1/search",
+            headers={"Authorization": PEXELS_API_KEY},
+            params={"query": query, "per_page": 5, "orientation": "landscape"},
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            print(f"  [Image] Pexels error {resp.status_code}")
+            return None
+
+        photos = resp.json().get("photos", [])
+        if not photos:
+            # Fallback to generic news query
+            resp2 = requests.get(
+                "https://api.pexels.com/v1/search",
+                headers={"Authorization": PEXELS_API_KEY},
+                params={"query": "news world", "per_page": 5, "orientation": "landscape"},
+                timeout=10,
+            )
+            photos = resp2.json().get("photos", []) if resp2.status_code == 200 else []
+
+        if not photos:
+            print("  [Image] No photos found")
+            return None
+
+        # Pick first photo, use medium size
+        photo_url = photos[0]["src"].get("medium") or photos[0]["src"]["original"]
+        print(f"  [Image] Downloading: {photo_url}")
+
+        img_resp = requests.get(photo_url, timeout=15)
+        img = Image.open(io.BytesIO(img_resp.content)).convert("RGB")
+
+        # Resize to fill the panel (crop center)
+        img = crop_center_fit(img, width, height)
+
+        # Darken slightly so text stays readable if it overlaps
+        img = ImageEnhance.Brightness(img).enhance(0.75)
+
+        print(f"  [Image] OK: {img.size}")
+        return img
+
+    except Exception as e:
+        print(f"  [Image] Failed: {e}")
+        return None
+
+
+def crop_center_fit(img: Image.Image, target_w: int, target_h: int) -> Image.Image:
+    """Resize and center-crop image to exact target dimensions."""
+    src_w, src_h = img.size
+    scale = max(target_w / src_w, target_h / src_h)
+    new_w = int(src_w * scale)
+    new_h = int(src_h * scale)
+    img = img.resize((new_w, new_h), Image.LANCZOS)
+    left = (new_w - target_w) // 2
+    top  = (new_h - target_h) // 2
+    return img.crop((left, top, left + target_w, top + target_h))
 
 
 # ===========================================================================
@@ -136,24 +221,56 @@ def wrap_text(draw, text, font, max_w):
 
 
 # ===========================================================================
-# News overlay
+# News overlay  (news_img is a pre-fetched PIL Image or None)
 # ===========================================================================
-def draw_overlay(base_arr, topic, caption_text):
+def draw_overlay(base_arr, topic, caption_text, news_img=None):
     img  = Image.fromarray(base_arr.astype(np.uint8), "RGB")
     draw = ImageDraw.Draw(img)
 
-    f_channel  = load_font(52)
-    f_breaking = load_font(38)
-    f_topic    = load_font(44)
+    f_channel  = load_font(48)
+    f_breaking = load_font(34)
+    f_topic    = load_font(42)
     f_cap      = load_font(52, tamil=True)
     f_ad       = load_font(48)
     f_ad2      = load_font(34)
 
-    # ── Header bar ──────────────────────────────────────────
+    # ── Header background ────────────────────────────────────
     draw.rectangle([0, 0, W, HEADER_H], fill=(5, 15, 70))
+
+    # ── Right panel: news image ──────────────────────────────
+    if news_img is not None:
+        # Paste image into right portion of header
+        img_x = TEXT_PANEL_W
+        img_panel = news_img.resize((IMG_PANEL_W, HEADER_H), Image.LANCZOS)
+        img.paste(img_panel, (img_x, 0))
+
+        # Gradient overlay on left edge of image for smooth blend
+        gradient = Image.new("RGBA", (80, HEADER_H), (0, 0, 0, 0))
+        for gx in range(80):
+            alpha = int(255 * (1 - gx / 80))
+            for gy in range(HEADER_H):
+                gradient.putpixel((gx, gy), (5, 15, 70, alpha))
+        img_rgba = img.convert("RGBA")
+        img_rgba.paste(gradient, (img_x, 0), gradient)
+        img = img_rgba.convert("RGB")
+        draw = ImageDraw.Draw(img)
+
+        # Thin vertical divider line
+        draw.rectangle([img_x, 0, img_x + 3, HEADER_H], fill=(200, 20, 20))
+
+    # ── Left panel: channel name + breaking news ─────────────
+    # Dark overlay on left panel so text is always readable
+    left_overlay = Image.new("RGBA", (TEXT_PANEL_W, HEADER_H), (5, 15, 70, 220))
+    img_rgba = img.convert("RGBA")
+    img_rgba.paste(left_overlay, (0, 0), left_overlay)
+    img = img_rgba.convert("RGB")
+    draw = ImageDraw.Draw(img)
+
+    shadow_text(draw, (24, 18),  CHANNEL,        f_channel,  fill=(255, 255, 255))
+    shadow_text(draw, (24, 90),  "BREAKING NEWS", f_breaking, fill=(255, 60, 60))
+
+    # Red bottom border on header
     draw.rectangle([0, HEADER_H - 6, W, HEADER_H], fill=(200, 20, 20))
-    shadow_text(draw, (30, 14),  CHANNEL,        f_channel,  fill=(255, 255, 255))
-    shadow_text(draw, (30, 100), "BREAKING NEWS", f_breaking, fill=(255, 60, 60))
 
     # ── Topic strip ─────────────────────────────────────────
     topic_y = HEADER_H + 4
@@ -165,19 +282,16 @@ def draw_overlay(base_arr, topic, caption_text):
 
     # ── LOWER THIRD captions (above footer) ─────────────────
     if caption_text and caption_text.strip():
-        lt_top = H - FOOTER_H - LOWER_THIRD_H   # y start of lower third
+        lt_top = H - FOOTER_H - LOWER_THIRD_H
 
-        # Red left accent bar
         draw.rectangle([0, lt_top, 12, H - FOOTER_H], fill=(220, 20, 20))
 
-        # Semi-transparent dark background for lower third
         lt_bg = Image.new("RGBA", (W, LOWER_THIRD_H), (0, 0, 0, 200))
         img_rgba = img.convert("RGBA")
         img_rgba.paste(lt_bg, (0, lt_top), lt_bg)
         img  = img_rgba.convert("RGB")
         draw = ImageDraw.Draw(img)
 
-        # Thin gold top border on lower third
         draw.rectangle([0, lt_top, W, lt_top + 5], fill=(255, 200, 0))
 
         cap_lines = wrap_text(draw, caption_text, f_cap, W - 80)[:3]
@@ -244,9 +358,8 @@ def run_sadtalker(face_path, audio_path, output_dir):
         "--source_image", face_path,
         "--result_dir",   output_dir,
         "--cpu",
-        "--preprocess",   "full",    # full body movement
+        "--preprocess",   "full",
         "--size",         "256",
-        # NO --still → enables natural head & body movement
     ]
     print(f"  [SadTalker] Running lip sync + head/body movement (CPU)...")
     try:
@@ -361,7 +474,7 @@ def split_captions(text, n):
 # ===========================================================================
 # Build one video
 # ===========================================================================
-def build_video(audio_path, spoken_text, topic, output_path, anchor_face):
+def build_video(audio_path, spoken_text, topic, output_path, anchor_face, news_img=None):
     # ── Load & boost audio ──────────────────────────────────
     audio    = AudioFileClip(audio_path).volumex(VOLUME_BOOST)
     duration = audio.duration
@@ -428,10 +541,10 @@ def build_video(audio_path, spoken_text, topic, output_path, anchor_face):
                 frame = bg_arr.copy()
 
             seg_idx = min(int(t / seg_dur), n_segs - 1)
-            return draw_overlay(frame, topic, segments[seg_idx])
+            return draw_overlay(frame, topic, segments[seg_idx], news_img)
         except Exception as e:
             print(f"  make_frame err t={t:.1f}: {e}")
-            return draw_overlay(bg_arr.copy(), topic, "")
+            return draw_overlay(bg_arr.copy(), topic, "", None)
 
     clip  = VideoClip(make_frame, duration=duration)
     final = clip.set_audio(audio)
@@ -468,14 +581,15 @@ def build_video(audio_path, spoken_text, topic, output_path, anchor_face):
 # ===========================================================================
 def main():
     print("=" * 65)
-    print("Tamil News Video Creator v14")
-    print("SadTalker lip sync + head/body movement | Volume 2x | Lower third")
+    print("Tamil News Video Creator v15")
+    print("SadTalker lip sync + head/body movement | Volume 2x | News image header")
     print("=" * 65)
     print(f"Time         : {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print(f"Anchor       : {SUPPLIED_ANCHOR} -> {os.path.exists(SUPPLIED_ANCHOR)}")
     print(f"SadTalker    : {SADTALKER_DIR} -> {os.path.exists(os.path.join(SADTALKER_DIR,'inference.py'))}")
     print(f"Wav2Lip ckpt : {WAV2LIP_CHECKPOINT} -> {os.path.exists(WAV2LIP_CHECKPOINT)}")
     print(f"Volume boost : {VOLUME_BOOST}x")
+    print(f"Pexels key   : {'SET' if PEXELS_API_KEY else 'NOT SET'}")
 
     os.makedirs(VIDEO_DIR,  exist_ok=True)
     os.makedirs(ASSETS_DIR, exist_ok=True)
@@ -513,12 +627,15 @@ def main():
             print(f"  SKIP: audio missing: {audio_path}")
             continue
 
+        # Fetch news image once per video (not per frame)
+        news_img = fetch_news_image(topic, IMG_PANEL_W, HEADER_H)
+
         spoken      = extract_spoken(script_data.get("script", "")) or topic
         ts          = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = os.path.join(VIDEO_DIR, f"reel_{i}_{ts}.mp4")
 
         try:
-            ok = build_video(audio_path, spoken, topic, output_path, anchor_face)
+            ok = build_video(audio_path, spoken, topic, output_path, anchor_face, news_img)
             if ok:
                 sz = os.path.getsize(output_path) / 1024 / 1024
                 created.append({
