@@ -1,4 +1,4 @@
-name: Tamil News Bot - Daily Run
+name: World News Bot - Daily Run
 on:
   schedule:
     - cron: "30 1 * * *"
@@ -35,6 +35,7 @@ jobs:
           pip install Pillow numpy scipy
           pip install opencv-python-headless
           pip install librosa==0.10.1 numba==0.58.1
+          pip install pydrive2 oauth2client
 
       - name: Install Wav2Lip dependencies
         run: |
@@ -58,6 +59,11 @@ jobs:
             echo "basicsr not found - OK"
           fi
 
+      - name: Write Google credentials JSON
+        run: |
+          echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > /tmp/google_credentials.json
+          echo "Google credentials written"
+
       - name: Clone SadTalker and download checkpoints
         run: |
           git clone https://github.com/OpenTalker/SadTalker.git /tmp/SadTalker
@@ -71,7 +77,7 @@ jobs:
           wget -q -O /tmp/SadTalker/checkpoints/mapping_00109-model.pth.tar \
             "https://github.com/OpenTalker/SadTalker/releases/download/v0.0.2-rc/mapping_00109-model.pth.tar"
 
-          echo "=== BFM Fitting files (direct wget from known public URLs) ==="
+          echo "=== BFM Fitting files ==="
           cd /tmp/SadTalker/checkpoints/BFM_Fitting
 
           wget -q -O 01_MorphableModel.mat \
@@ -93,10 +99,7 @@ jobs:
           wget -q -O similarity_Lm3D_all.mat "${BASE}/similarity_Lm3D_all.mat" || echo "WARN: similarity_Lm3D_all.mat failed"
           wget -q -O std_exp.txt             "${BASE}/std_exp.txt"             || echo "WARN: std_exp.txt failed"
 
-          echo "=== BFM count: $(ls /tmp/SadTalker/checkpoints/BFM_Fitting/ | wc -l) / 8 files ==="
-          ls -lh /tmp/SadTalker/checkpoints/BFM_Fitting/
-
-          echo "=== Patch SadTalker: np.float/int/bool → native Python types ==="
+          echo "=== Patch SadTalker ==="
           find /tmp/SadTalker -name "*.py" -exec \
             sed -i \
               -e 's/np\.float\b/float/g' \
@@ -106,7 +109,6 @@ jobs:
               -e 's/np\.object\b/object/g' \
               -e 's/np\.str\b/str/g' \
             {} +
-          echo "np.float patch applied"
 
           echo "=== Pre-download facexlib models ==="
           wget -q -O /tmp/SadTalker/gfpgan/weights/alignment_WFLW_4HG.pth \
@@ -123,22 +125,20 @@ jobs:
           wget -q -O /tmp/Wav2Lip/checkpoints/wav2lip_gan.pth \
             "https://huggingface.co/numz/wav2lip_studio/resolve/main/Wav2lip/wav2lip_gan.pth"
 
-          echo "=== Patch Wav2Lip audio.py for librosa >= 0.10 ==="
+          echo "=== Patch Wav2Lip audio.py ==="
           sed -i \
             's/librosa\.filters\.mel(hp\.sample_rate, hp\.n_fft,/librosa.filters.mel(sr=hp.sample_rate, n_fft=hp.n_fft,/g' \
             /tmp/Wav2Lip/audio.py
           sed -i \
             's/librosa\.filters\.mel(hparams\.sample_rate, hparams\.n_fft,/librosa.filters.mel(sr=hparams.sample_rate, n_fft=hparams.n_fft,/g' \
             /tmp/Wav2Lip/audio.py
-          echo "audio.py after patch:"
-          grep 'filters.mel' /tmp/Wav2Lip/audio.py
 
       - name: Verify setup
         run: |
           python -c "import torch; print('torch', torch.__version__)"
           python -c "import face_alignment; print('face_alignment OK')" || echo "face_alignment WARN"
+          python -c "from pydrive2.auth import GoogleAuth; print('pydrive2 OK')"
           ls /tmp/SadTalker/inference.py && echo "SadTalker OK" || echo "SadTalker MISSING"
-          ls /tmp/SadTalker/checkpoints/BFM_Fitting/BFM_model_front.mat && echo "BFM OK" || echo "BFM MISSING ERROR"
           ls /tmp/Wav2Lip/checkpoints/wav2lip_gan.pth && echo "Wav2Lip OK" || echo "Wav2Lip MISSING"
 
       - name: Create output folders
@@ -147,15 +147,20 @@ jobs:
           mkdir -p tamil-news-bot-github_3/tamil-news-bot/output/videos
           mkdir -p tamil-news-bot-github_3/tamil-news-bot/logs
 
-      - name: Run Tamil News Bot
+      - name: Run News Bot
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
-          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
-          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
-          IG_BUSINESS_ID: ${{ secrets.IG_BUSINESS_ID }}
-          SADTALKER_DIR: /tmp/SadTalker
-          WAV2LIP_DIR: /tmp/Wav2Lip
+          OPENAI_API_KEY:          ${{ secrets.OPENAI_API_KEY }}
+          PEXELS_API_KEY:          ${{ secrets.PEXELS_API_KEY }}
+          PIXABAY_API_KEY:         ${{ secrets.PIXABAY_API_KEY }}
+          IG_ACCESS_TOKEN:         ${{ secrets.IG_ACCESS_TOKEN }}
+          IG_BUSINESS_ID:          ${{ secrets.IG_BUSINESS_ID }}
+          CLOUDINARY_CLOUD_NAME:   ${{ secrets.CLOUDINARY_CLOUD_NAME }}
+          CLOUDINARY_API_KEY:      ${{ secrets.CLOUDINARY_API_KEY }}
+          CLOUDINARY_API_SECRET:   ${{ secrets.CLOUDINARY_API_SECRET }}
+          GOOGLE_DRIVE_FOLDER_ID:  ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
+          GOOGLE_CREDENTIALS_JSON: /tmp/google_credentials.json
+          SADTALKER_DIR:           /tmp/SadTalker
+          WAV2LIP_DIR:             /tmp/Wav2Lip
         run: |
           python tamil-news-bot-github_3/tamil-news-bot/scripts/run_all.py
 
@@ -164,21 +169,22 @@ jobs:
         run: |
           echo "=== Videos ===" && ls -lh tamil-news-bot-github_3/tamil-news-bot/output/videos/ || echo "No videos"
           echo "=== Audio ===" && ls -lh tamil-news-bot-github_3/tamil-news-bot/output/audio/ || echo "No audio"
+          echo "=== Logs ===" && cat tamil-news-bot-github_3/tamil-news-bot/logs/posting_log.json || echo "No posting log"
 
-      - name: Upload videos
+      - name: Upload videos as artifact (backup)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: tamil-news-videos-${{ github.run_number }}
+          name: news-videos-${{ github.run_number }}
           path: tamil-news-bot-github_3/tamil-news-bot/output/videos/
           retention-days: 7
           if-no-files-found: ignore
 
-      - name: Upload logs
+      - name: Upload logs as artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: tamil-news-logs-${{ github.run_number }}
+          name: news-logs-${{ github.run_number }}
           path: tamil-news-bot-github_3/tamil-news-bot/logs/
           retention-days: 7
           if-no-files-found: ignore
