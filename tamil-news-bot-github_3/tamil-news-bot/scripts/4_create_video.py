@@ -1,16 +1,17 @@
 """
-STEP 4: Tamil News Video Creator (v17)
+STEP 4: Tamil News Video Creator (v18)
 =======================================
 - SadTalker: lip sync + head & body movements
 - Wav2Lip fallback
 - Audio volume boosted 2x
 - Captions in lower third (above footer)
 - Dark navy background
-- TOP PANEL: Multiple Pexels B-roll clips cutting every 8-10s (true B-roll)
-- Anchor occupies lower 72% as always
+- TOP PANEL: B-roll video cuts every 4s, NO topic strip gap between broll and anchor
+- Topic text overlaid directly on B-roll bottom edge
+- Skip videos with audio < 10s (refused scripts)
 """
 
-import json, os, sys, re, subprocess, glob, tempfile, numpy as np, requests, io
+import json, os, sys, re, subprocess, glob, tempfile, numpy as np, requests
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 
@@ -39,18 +40,22 @@ AD_LINE2 = "Contact: 8111024877"
 CHANNEL  = "Tamil News Live"
 
 VOLUME_BOOST    = 2.0
-BROLL_CUT_EVERY = 8.0   # seconds between B-roll cuts
+BROLL_CUT_EVERY = 4.0    # seconds between B-roll cuts
+MIN_AUDIO_DUR   = 10.0   # skip video if audio shorter than this (refused script)
 
 SADTALKER_DIR      = os.environ.get("SADTALKER_DIR", "/tmp/SadTalker")
 WAV2LIP_DIR        = os.environ.get("WAV2LIP_DIR", "/tmp/Wav2Lip")
 WAV2LIP_CHECKPOINT = os.path.join(WAV2LIP_DIR, "checkpoints/wav2lip_gan.pth")
 PEXELS_API_KEY     = os.environ.get("PEXELS_API_KEY", "")
 
-# Layout
-ANCHOR_H      = int(H * 0.72)        # 1382px — anchor bottom section
-TOP_PANEL_H   = H - ANCHOR_H         # 538px  — B-roll top section
-HEADER_BAR_H  = 130                  # channel name overlay inside top panel
-TOPIC_STRIP_H = 120
+# ---------------------------------------------------------------------------
+# Layout — NO gap between B-roll and anchor
+# ---------------------------------------------------------------------------
+ANCHOR_H      = int(H * 0.72)   # 1382px — anchor fills bottom
+TOP_PANEL_H   = H - ANCHOR_H    # 538px  — B-roll fills top, directly above anchor
+# Overlays inside the TOP PANEL (no separate strip below it)
+HEADER_BAR_H  = 120             # channel name bar at very top of B-roll panel
+TOPIC_BAR_H   = 110             # topic text bar at BOTTOM of B-roll panel
 FOOTER_H      = 160
 LOWER_THIRD_H = 240
 
@@ -78,6 +83,8 @@ TAMIL_KEYWORD_MAP = [
     ("வெள்ளம்",      "flood disaster"),
     ("தேர்தல்",      "election voting"),
     ("நாடாளுமன்ற",   "parliament"),
+    ("தலைமை செயலாளர்","government official"),
+    ("அரசு",         "government India"),
     ("பொருளாதார",    "economy finance"),
     ("பங்கு சந்தை",  "stock market"),
     ("கிரிக்கெட்",   "cricket"),
@@ -103,8 +110,8 @@ TAMIL_KEYWORD_MAP = [
     ("கர்ப்பம்",     "pregnancy"),
     ("பிரசவ",        "hospital birth"),
     ("குழந்தை",      "child baby"),
-    ("கல்வி",        "education"),
-    ("போராட்டம்",    "protest"),
+    ("கல்வி",        "education school"),
+    ("போராட்டம்",    "protest crowd"),
     ("கைது",         "police"),
     ("நீதிமன்ற",     "court justice"),
     ("தண்டனை",       "verdict court"),
@@ -117,10 +124,12 @@ TAMIL_KEYWORD_MAP = [
     ("சாதி",         "protest India"),
     ("மதுரை",        "India temple"),
     ("கோவில்",       "temple India"),
+    ("தமிழ்நாடு",    "Tamil Nadu India"),
+    ("சென்னை",       "Chennai India"),
 ]
 
 def topic_to_query(topic: str, script_text: str = "") -> str:
-    # Use topic + first 200 chars of script, strip script formatting keywords
+    skip_words = {"HOOK", "STORY", "CTA", "TRUTH", "sec", "TAGS", "FORMAT", "RULES"}
     combined = topic + " " + re.sub(r'(HOOK|STORY|CTA|TRUTH|HASHTAG)[^\n]*', '', script_text[:300])
     matched = []
     for tamil_kw, english_kw in TAMIL_KEYWORD_MAP:
@@ -132,9 +141,7 @@ def topic_to_query(topic: str, script_text: str = "") -> str:
         q = " ".join(matched[:2])
         print(f"  [BRoll] Tamil match → '{q}'")
         return q
-    # Extract English words but skip script structure words
-    skip = {"HOOK", "STORY", "CTA", "TRUTH", "sec", "TAGS", "FORMAT"}
-    en_words = [w for w in re.findall(r'[A-Za-z]{4,}', combined) if w.upper() not in skip]
+    en_words = [w for w in re.findall(r'[A-Za-z]{4,}', combined) if w.upper() not in skip_words]
     if en_words:
         q = " ".join(en_words[:3])
         print(f"  [BRoll] English words → '{q}'")
@@ -144,12 +151,11 @@ def topic_to_query(topic: str, script_text: str = "") -> str:
 
 
 # ===========================================================================
-# Fetch multiple B-roll video clips from Pexels
-# Returns list of local temp file paths
+# Fetch multiple B-roll clips from Pexels
 # ===========================================================================
-def fetch_broll_videos(topic: str, script_text: str, count: int = 5) -> list[str]:
+def fetch_broll_videos(topic: str, script_text: str, count: int = 8) -> list:
     if not PEXELS_API_KEY:
-        print("  [BRoll] No PEXELS_API_KEY — skipping")
+        print("  [BRoll] No PEXELS_API_KEY")
         return []
 
     query = topic_to_query(topic, script_text)
@@ -183,7 +189,6 @@ def fetch_broll_videos(topic: str, script_text: str, count: int = 5) -> list[str
 
         for idx, video in enumerate(videos):
             try:
-                # Pick smallest resolution >= 480p
                 vfiles = sorted(
                     [f for f in video.get("video_files", []) if f.get("width", 0) >= 480],
                     key=lambda f: f.get("width", 9999)
@@ -197,10 +202,10 @@ def fetch_broll_videos(topic: str, script_text: str, count: int = 5) -> list[str
                     tmp.write(chunk)
                 tmp.close()
                 size_mb = os.path.getsize(tmp.name) / 1024 / 1024
-                print(f"  [BRoll] #{idx+1} {vfiles[0].get('width')}x{vfiles[0].get('height')} {size_mb:.1f}MB → {tmp.name}")
+                print(f"  [BRoll] #{idx+1} {vfiles[0].get('width')}x{vfiles[0].get('height')} {size_mb:.1f}MB")
                 paths.append(tmp.name)
             except Exception as e:
-                print(f"  [BRoll] #{idx+1} download failed: {e}")
+                print(f"  [BRoll] #{idx+1} failed: {e}")
 
     except Exception as e:
         print(f"  [BRoll] Fetch failed: {e}")
@@ -209,34 +214,27 @@ def fetch_broll_videos(topic: str, script_text: str, count: int = 5) -> list[str
 
 
 # ===========================================================================
-# Build a single B-roll segment: resize+crop one clip to (W x TOP_PANEL_H)
-# Returns numpy array of shape (TOP_PANEL_H, W, 3) or None
+# Resize/crop a frame to TOP_PANEL_H x W
 # ===========================================================================
 def resize_crop_frame(frame: np.ndarray) -> np.ndarray:
-    """Resize and center-crop a single frame to (TOP_PANEL_H, W)."""
     img = Image.fromarray(frame.astype(np.uint8), "RGB")
     src_w, src_h = img.size
-    target_w, target_h = W, TOP_PANEL_H
-    scale = max(target_w / src_w, target_h / src_h)
+    scale = max(W / src_w, TOP_PANEL_H / src_h)
     new_w = int(src_w * scale)
     new_h = int(src_h * scale)
-    img = img.resize((new_w, new_h), Image.BILINEAR)
-    left = (new_w - target_w) // 2
-    top  = (new_h - target_h) // 2
-    img  = img.crop((left, top, left + target_w, top + target_h))
-    return np.array(img)
+    img   = img.resize((new_w, new_h), Image.BILINEAR)
+    left  = (new_w - W) // 2
+    top   = (new_h - TOP_PANEL_H) // 2
+    return np.array(img.crop((left, top, left + W, top + TOP_PANEL_H)))
 
 
-def prepare_broll_clips(video_paths: list[str], total_duration: float) -> list[dict]:
-    """
-    Load all broll clips, trim each to BROLL_CUT_EVERY seconds,
-    arrange them to cover total_duration with cuts.
-    Returns list of dicts: {clip, start_t, end_t}
-    """
+# ===========================================================================
+# Build segment schedule from clip list
+# ===========================================================================
+def prepare_broll_segments(video_paths: list, total_duration: float):
     segments = []
-    t = 0.0
-
     clip_objects = []
+
     for p in video_paths:
         try:
             c = VideoFileClip(p, audio=False)
@@ -245,10 +243,11 @@ def prepare_broll_clips(video_paths: list[str], total_duration: float) -> list[d
             print(f"  [BRoll] Load failed {p}: {e}")
 
     if not clip_objects:
-        return []
+        return [], []
 
-    clip_idx = 0
-    clip_offset = 0.0  # how far into current clip we are
+    t         = 0.0
+    clip_idx  = 0
+    clip_pos  = 0.0   # position within current clip
 
     while t < total_duration:
         seg_end = min(t + BROLL_CUT_EVERY, total_duration)
@@ -256,41 +255,37 @@ def prepare_broll_clips(video_paths: list[str], total_duration: float) -> list[d
 
         clip = clip_objects[clip_idx % len(clip_objects)]
 
-        # How much is left in this clip from current offset
-        clip_remaining = clip.duration - clip_offset
-        if clip_remaining < seg_dur:
-            # Not enough left — advance to next clip
+        # If not enough left in this clip, move to next
+        if clip.duration - clip_pos < seg_dur:
             clip_idx += 1
-            clip_offset = 0.0
+            clip_pos  = 0.0
             clip = clip_objects[clip_idx % len(clip_objects)]
 
-        seg_clip = clip.subclip(clip_offset, clip_offset + seg_dur)
         segments.append({
-            "clip":    seg_clip,
-            "start_t": t,
-            "end_t":   seg_end,
+            "clip":     clip,
+            "clip_pos": clip_pos,
+            "start_t":  t,
+            "end_t":    seg_end,
         })
 
-        clip_offset += seg_dur
-        # If we've used most of this clip, move to next
-        if clip_offset >= clip.duration - 0.5:
+        clip_pos += seg_dur
+        if clip_pos >= clip.duration - 0.2:
             clip_idx += 1
-            clip_offset = 0.0
+            clip_pos  = 0.0
 
         t = seg_end
 
-    print(f"  [BRoll] {len(segments)} segments from {len(clip_objects)} clips, covering {total_duration:.1f}s")
+    print(f"  [BRoll] {len(segments)} segments × {BROLL_CUT_EVERY}s from {len(clip_objects)} clips → {total_duration:.1f}s")
     return segments, clip_objects
 
 
-def get_broll_frame(segments: list[dict], t: float) -> np.ndarray | None:
-    """Get the B-roll frame for time t."""
+def get_broll_frame(segments: list, t: float):
     for seg in segments:
         if seg["start_t"] <= t < seg["end_t"]:
-            local_t = t - seg["start_t"]
+            local_t = seg["clip_pos"] + (t - seg["start_t"])
             try:
-                frame = seg["clip"].get_frame(min(local_t, seg["clip"].duration - 0.01))
-                return resize_crop_frame(frame)
+                raw = seg["clip"].get_frame(min(local_t, seg["clip"].duration - 0.01))
+                return resize_crop_frame(raw)
             except Exception:
                 return None
     return None
@@ -301,9 +296,7 @@ def get_broll_frame(segments: list[dict], t: float) -> np.ndarray | None:
 # ===========================================================================
 def make_bg():
     a = np.zeros((H, W, 3), dtype=np.uint8)
-    a[:, :, 0] = 8
-    a[:, :, 1] = 12
-    a[:, :, 2] = 45
+    a[:, :, 0] = 8; a[:, :, 1] = 12; a[:, :, 2] = 45
     cy = H // 2
     for y in range(0, H, 4):
         boost = int(15 * (1 - abs(y - cy) / cy))
@@ -386,6 +379,13 @@ def wrap_text(draw, text, font, max_w):
 
 # ===========================================================================
 # Draw overlay
+# Layout (top→bottom, no gap):
+#   [0 .. TOP_PANEL_H]   = B-roll video
+#     └ [0..HEADER_BAR_H]      = channel name + BREAKING NEWS overlay
+#     └ [TOP_PANEL_H-TOPIC_BAR_H .. TOP_PANEL_H] = topic text overlay
+#   [TOP_PANEL_H .. H-FOOTER_H-LOWER_THIRD_H] = anchor (no gap)
+#   [H-FOOTER_H-LOWER_THIRD_H .. H-FOOTER_H]  = captions
+#   [H-FOOTER_H .. H]                          = footer ad
 # ===========================================================================
 def draw_overlay(base_arr, topic, caption_text, broll_frame=None):
     img  = Image.fromarray(base_arr.astype(np.uint8), "RGB")
@@ -393,12 +393,12 @@ def draw_overlay(base_arr, topic, caption_text, broll_frame=None):
 
     f_channel  = load_font(50)
     f_breaking = load_font(36)
-    f_topic    = load_font(42)
+    f_topic    = load_font(40, tamil=True)
     f_cap      = load_font(52, tamil=True)
     f_ad       = load_font(48)
     f_ad2      = load_font(34)
 
-    # ── Top panel: B-roll frame ──────────────────────────────
+    # ── TOP PANEL: B-roll ────────────────────────────────────
     if broll_frame is not None:
         broll_img = Image.fromarray(broll_frame.astype(np.uint8), "RGB")
         broll_img = ImageEnhance.Brightness(broll_img).enhance(0.70)
@@ -406,29 +406,32 @@ def draw_overlay(base_arr, topic, caption_text, broll_frame=None):
     else:
         draw.rectangle([0, 0, W, TOP_PANEL_H], fill=(5, 15, 70))
 
-    # ── Channel name bar overlay ─────────────────────────────
+    # Channel name bar — top of B-roll
     bar_ov = Image.new("RGBA", (W, HEADER_BAR_H), (5, 15, 70, 210))
     img_rgba = img.convert("RGBA")
     img_rgba.paste(bar_ov, (0, 0), bar_ov)
     img  = img_rgba.convert("RGB")
     draw = ImageDraw.Draw(img)
+    shadow_text(draw, (24, 14),  CHANNEL,        f_channel,  fill=(255, 255, 255))
+    shadow_text(draw, (24, 76),  "BREAKING NEWS", f_breaking, fill=(255, 60, 60))
 
-    shadow_text(draw, (24, 16),  CHANNEL,        f_channel,  fill=(255, 255, 255))
-    shadow_text(draw, (24, 82),  "BREAKING NEWS", f_breaking, fill=(255, 60, 60))
+    # Topic bar — bottom of B-roll, overlaid on video
+    topic_top = TOP_PANEL_H - TOPIC_BAR_H
+    topic_ov  = Image.new("RGBA", (W, TOPIC_BAR_H), (0, 0, 0, 210))
+    img_rgba  = img.convert("RGBA")
+    img_rgba.paste(topic_ov, (0, topic_top), topic_ov)
+    img  = img_rgba.convert("RGB")
+    draw = ImageDraw.Draw(img)
+    # Gold left accent
+    draw.rectangle([0, topic_top, 8, TOP_PANEL_H], fill=(255, 200, 0))
+    # Red bottom border
+    draw.rectangle([0, TOP_PANEL_H - 5, W, TOP_PANEL_H], fill=(200, 20, 20))
+    ty = topic_top + 10
+    for line in wrap_text(draw, topic[:90], f_topic, W - 30)[:2]:
+        shadow_text(draw, (20, ty), line, f_topic, fill=(255, 215, 0))
+        ty += 50
 
-    # Red border bottom of top panel
-    draw.rectangle([0, TOP_PANEL_H - 6, W, TOP_PANEL_H], fill=(200, 20, 20))
-
-    # ── Topic strip ──────────────────────────────────────────
-    topic_y = TOP_PANEL_H
-    draw.rectangle([0, topic_y, W, topic_y + TOPIC_STRIP_H], fill=(0, 0, 0, 220))
-    draw.rectangle([0, topic_y, 8, topic_y + TOPIC_STRIP_H], fill=(255, 200, 0))
-    ty = topic_y + 10
-    for line in wrap_text(draw, topic[:90], f_topic, W - 40)[:2]:
-        shadow_text(draw, (24, ty), line, f_topic, fill=(255, 215, 0))
-        ty += 56
-
-    # ── Lower third captions ─────────────────────────────────
+    # ── LOWER THIRD captions ─────────────────────────────────
     if caption_text and caption_text.strip():
         lt_top = H - FOOTER_H - LOWER_THIRD_H
         draw.rectangle([0, lt_top, 12, H - FOOTER_H], fill=(220, 20, 20))
@@ -456,7 +459,7 @@ def draw_overlay(base_arr, topic, caption_text, broll_frame=None):
 
 
 # ===========================================================================
-# Composite anchor (lower 72%)
+# Composite anchor — fills from TOP_PANEL_H to H-FOOTER_H area
 # ===========================================================================
 def composite_anchor(bg_arr, anchor_frame):
     bg  = Image.fromarray(bg_arr.astype(np.uint8), "RGB")
@@ -479,9 +482,9 @@ def run_sadtalker(face_path, audio_path, output_dir):
     if not sadtalker_available(): return None
     if not face_path or not os.path.exists(face_path): return None
     wav_path = audio_path.rsplit(".", 1)[0] + "_16k_st.wav"
-    conv = subprocess.run(["ffmpeg", "-y", "-i", audio_path, "-ar", "16000", "-ac", "1", wav_path],
-                          capture_output=True, text=True, timeout=60)
-    if conv.returncode != 0: return None
+    if subprocess.run(["ffmpeg", "-y", "-i", audio_path, "-ar", "16000", "-ac", "1", wav_path],
+                      capture_output=True, timeout=60).returncode != 0:
+        return None
     os.makedirs(output_dir, exist_ok=True)
     cmd = [sys.executable, "inference.py",
            "--driven_audio", wav_path, "--source_image", face_path,
@@ -496,8 +499,7 @@ def run_sadtalker(face_path, audio_path, output_dir):
         mp4s = sorted(glob.glob(os.path.join(output_dir, "**/*.mp4"), recursive=True))
         return mp4s[-1] if mp4s else None
     except Exception as e:
-        print(f"  [SadTalker] Exception: {e}")
-        return None
+        print(f"  [SadTalker] Exception: {e}"); return None
 
 
 # ===========================================================================
@@ -513,9 +515,9 @@ def run_wav2lip(face_path, audio_path, output_path):
     if not wav2lip_available(): return False
     if not face_path or not os.path.exists(face_path): return False
     wav_path = audio_path.rsplit(".", 1)[0] + "_16k_wl.wav"
-    conv = subprocess.run(["ffmpeg", "-y", "-i", audio_path, "-ar", "16000", "-ac", "1", wav_path],
-                          capture_output=True, text=True, timeout=60)
-    if conv.returncode != 0: return False
+    if subprocess.run(["ffmpeg", "-y", "-i", audio_path, "-ar", "16000", "-ac", "1", wav_path],
+                      capture_output=True, timeout=60).returncode != 0:
+        return False
     cmd = [sys.executable, "inference.py",
            "--checkpoint_path", WAV2LIP_CHECKPOINT,
            "--face", face_path, "--audio", wav_path,
@@ -529,8 +531,7 @@ def run_wav2lip(face_path, audio_path, output_path):
             return False
         return os.path.exists(output_path) and os.path.getsize(output_path) > 10_000
     except Exception as e:
-        print(f"  [Wav2Lip] Exception: {e}")
-        return False
+        print(f"  [Wav2Lip] Exception: {e}"); return False
 
 
 # ===========================================================================
@@ -589,8 +590,7 @@ def build_video(audio_path, spoken_text, topic, output_path, anchor_face,
             anchor_clip = anchor_clip.subclip(0, duration)
             method = "sadtalker"
         except Exception as e:
-            print(f"  [SadTalker] Clip error: {e}")
-            anchor_clip = None
+            print(f"  [SadTalker] Clip error: {e}"); anchor_clip = None
 
     # Wav2Lip
     if anchor_clip is None:
@@ -606,8 +606,7 @@ def build_video(audio_path, spoken_text, topic, output_path, anchor_face,
                 method = "wav2lip"
                 print(f"  [Wav2Lip] Clip: {anchor_clip.w}x{anchor_clip.h}")
             except Exception as e:
-                print(f"  [Wav2Lip] Clip error: {e}")
-                anchor_clip = None
+                print(f"  [Wav2Lip] Clip error: {e}"); anchor_clip = None
 
     # Static fallback
     static_arr = None
@@ -621,17 +620,12 @@ def build_video(audio_path, spoken_text, topic, output_path, anchor_face,
     def make_frame(t):
         try:
             frame = bg_arr.copy()
-
-            # Anchor
             if anchor_clip is not None:
                 anc_f = anchor_clip.get_frame(min(t, anchor_clip.duration - 0.01))
                 frame = composite_anchor(frame, anc_f)
             elif static_arr is not None:
                 frame = composite_anchor(frame, static_arr)
-
-            # B-roll frame for this timestamp
             broll_f = get_broll_frame(broll_segments, t) if broll_segments else None
-
             seg_idx = min(int(t / seg_dur), n_segs - 1)
             return draw_overlay(frame, topic, segments[seg_idx], broll_f)
         except Exception as e:
@@ -671,8 +665,8 @@ def build_video(audio_path, spoken_text, topic, output_path, anchor_face,
 # ===========================================================================
 def main():
     print("=" * 65)
-    print("Tamil News Video Creator v17")
-    print("Wav2Lip | Multi-clip B-roll cuts every 8s | Smart Tamil query")
+    print("Tamil News Video Creator v18")
+    print("Wav2Lip | B-roll cuts every 4s | No gap | Skip short audio")
     print("=" * 65)
     print(f"Time         : {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print(f"Anchor       : {SUPPLIED_ANCHOR} -> {os.path.exists(SUPPLIED_ANCHOR)}")
@@ -680,7 +674,8 @@ def main():
     print(f"Wav2Lip ckpt : {WAV2LIP_CHECKPOINT} -> {os.path.exists(WAV2LIP_CHECKPOINT)}")
     print(f"Volume boost : {VOLUME_BOOST}x")
     print(f"Pexels key   : {'SET' if PEXELS_API_KEY else 'NOT SET'}")
-    print(f"B-roll cut   : every {BROLL_CUT_EVERY}s  |  top panel {W}x{TOP_PANEL_H}px")
+    print(f"B-roll cut   : every {BROLL_CUT_EVERY}s | top {W}x{TOP_PANEL_H}px | anchor {W}x{ANCHOR_H}px")
+    print(f"Min audio    : {MIN_AUDIO_DUR}s (skip refused scripts)")
 
     os.makedirs(VIDEO_DIR,  exist_ok=True)
     os.makedirs(ASSETS_DIR, exist_ok=True)
@@ -716,26 +711,28 @@ def main():
         if not os.path.exists(audio_path):
             print(f"  SKIP: audio missing: {audio_path}"); continue
 
-        # Get audio duration
+        # Check duration — skip refused/empty scripts
         try:
             tmp_a    = AudioFileClip(audio_path)
             duration = tmp_a.duration
             tmp_a.close()
         except Exception:
-            duration = 60.0
+            duration = 0.0
 
-        # How many clips we need: 1 per BROLL_CUT_EVERY seconds + 1 buffer
-        clips_needed = max(3, int(duration / BROLL_CUT_EVERY) + 2)
+        if duration < MIN_AUDIO_DUR:
+            print(f"  SKIP: audio too short ({duration:.1f}s < {MIN_AUDIO_DUR}s) — likely refused script")
+            continue
 
-        # Download multiple B-roll clips
-        broll_paths = fetch_broll_videos(topic, script_text, count=clips_needed)
+        # How many clips we need
+        clips_needed = max(4, int(duration / BROLL_CUT_EVERY) + 2)
 
+        broll_paths    = fetch_broll_videos(topic, script_text, count=clips_needed)
         broll_segments = None
-        broll_clip_objects = []
+        broll_clips    = []
         if broll_paths:
-            result = prepare_broll_clips(broll_paths, duration)
+            result = prepare_broll_segments(broll_paths, duration)
             if result:
-                broll_segments, broll_clip_objects = result
+                broll_segments, broll_clips = result
 
         spoken      = extract_spoken(script_text) or topic
         ts          = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -756,14 +753,11 @@ def main():
                 print(f"  FAILED: {topic}")
         except Exception as e:
             import traceback
-            print(f"  EXCEPTION: {e}")
-            traceback.print_exc()
+            print(f"  EXCEPTION: {e}"); traceback.print_exc()
         finally:
-            # Close all broll clip objects
-            for c in broll_clip_objects:
+            for c in broll_clips:
                 try: c.close()
                 except: pass
-            # Delete temp files
             for p in broll_paths:
                 if os.path.exists(p):
                     try: os.remove(p)
