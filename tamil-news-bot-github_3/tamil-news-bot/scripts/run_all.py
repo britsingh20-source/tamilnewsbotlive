@@ -1,67 +1,58 @@
 """
 🤖 TAMIL NEWS CHANNEL - DAILY AUTO-RUN MASTER SCRIPT
-Runs all 5 steps automatically:
+Runs all 7 steps automatically:
   1. Find trending news
   2. Generate Tamil scripts (OpenAI GPT-4o)
   3. Create Tamil voiceover (Google TTS)
   4. Create videos with captions (MoviePy)
   5. Post to Instagram + YouTube
+  6. Upload videos to Google Drive (shareable links)
+  7. Append Drive links to Google Sheet (Status=Pending, Publish=Pending)
 
-SETUP INSTRUCTIONS:
-1. Install Python 3.9+
-2. Run: pip install requests gtts moviepy --break-system-packages
-3. Set your API keys below OR as environment variables
-4. Run: python run_all.py
-5. Schedule daily: crontab -e → add line:
-   0 7 * * * cd /path/to/tamil-news-bot && python scripts/run_all.py
-
-REQUIRED API KEYS (ALL FREE):
-- OPENAI_API_KEY: https://platform.openai.com/api-keys
-- PEXELS_API_KEY:    https://www.pexels.com/api (completely free)
-- IG_ACCESS_TOKEN:   https://developers.facebook.com (free)
-- IG_BUSINESS_ID:    Your Instagram Business Account ID
+REQUIRED ENV VARS:
+  OPENAI_API_KEY, PEXELS_API_KEY, IG_ACCESS_TOKEN, IG_BUSINESS_ID
+  GOOGLE_SERVICE_ACCOUNT_JSON, GOOGLE_SHEET_ID, GOOGLE_SHEET_TAB
 """
 
-import subprocess
-import sys
-import os
-import json
+import subprocess, sys, os, json
 from datetime import datetime
 
 # ============================================================
-# SET YOUR API KEYS HERE (or use environment variables)
+# SET YOUR API KEYS HERE (or export as environment variables)
 # ============================================================
-os.environ.setdefault("OPENAI_API_KEY", "YOUR_OPENAI_API_KEY")
-os.environ.setdefault("PEXELS_API_KEY", "YOUR_PEXELS_API_KEY")
-os.environ.setdefault("IG_ACCESS_TOKEN", "YOUR_IG_ACCESS_TOKEN")
-os.environ.setdefault("IG_BUSINESS_ID", "YOUR_IG_BUSINESS_ID")
+os.environ.setdefault("OPENAI_API_KEY",              "YOUR_OPENAI_API_KEY")
+os.environ.setdefault("PEXELS_API_KEY",              "YOUR_PEXELS_API_KEY")
+os.environ.setdefault("IG_ACCESS_TOKEN",             "YOUR_IG_ACCESS_TOKEN")
+os.environ.setdefault("IG_BUSINESS_ID",              "YOUR_IG_BUSINESS_ID")
+os.environ.setdefault("GOOGLE_SERVICE_ACCOUNT_JSON", "")   # paste full JSON string
+os.environ.setdefault("GOOGLE_SHEET_ID",             "YOUR_SPREADSHEET_ID_HERE")
+os.environ.setdefault("GOOGLE_SHEET_TAB",            "VideoLinks")
 # ============================================================
 
 SCRIPTS_DIR = os.path.dirname(__file__)
-LOG_DIR = os.path.join(SCRIPTS_DIR, "../logs")
+LOG_DIR     = os.path.join(SCRIPTS_DIR, "../logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
+# (script_name, description, stop_pipeline_on_failure)
 STEPS = [
-    ("1_find_news.py",       "🔍 Finding trending news"),
-    ("2_generate_script.py", "✍️  Generating Tamil scripts"),
-    ("3_generate_voice.py",  "🎙️  Creating Tamil voiceover"),
-    ("4_create_video.py",    "🎬 Creating videos"),
-    ("5_post_content.py",    "📱 Posting to Instagram + YouTube"),
+    ("1_find_news.py",       "🔍 Finding trending news",                          True),
+    ("2_generate_script.py", "✍️  Generating Tamil scripts",                       True),
+    ("3_generate_voice.py",  "🎙️  Creating Tamil voiceover",                      False),
+    ("4_create_video.py",    "🎬 Creating videos",                                 False),
+    ("5_post_content.py",    "📱 Posting to Instagram + YouTube",                  False),
+    ("6_upload_drive.py",    "☁️  Uploading videos to Google Drive",               False),
+    ("7_append_sheet.py",    "📊 Appending Drive links → Google Sheet (Pending)",  False),
 ]
 
+
 def run_step(script_name, description):
-    """Run a single automation step"""
-    print(f"\n{'='*55}")
-    print(f"{description}")
-    print(f"{'='*55}")
-    script_path = os.path.join(SCRIPTS_DIR, script_name)
+    print(f"\n{'='*55}\n{description}\n{'='*55}")
     result = subprocess.run(
-        [sys.executable, script_path],
-        capture_output=False,
-        text=True,
-        env=os.environ.copy()
+        [sys.executable, os.path.join(SCRIPTS_DIR, script_name)],
+        capture_output=False, text=True, env=os.environ.copy(),
     )
     return result.returncode == 0
+
 
 def main():
     start_time = datetime.now()
@@ -73,31 +64,29 @@ def main():
 """)
 
     results = {}
-    for script_name, description in STEPS:
+    for script_name, description, is_critical in STEPS:
         success = run_step(script_name, description)
         results[script_name] = "✅ Done" if success else "❌ Failed"
-        if not success and script_name in ["1_find_news.py", "2_generate_script.py"]:
-            print(f"\n⚠️  Critical step failed. Stopping pipeline.")
+        if not success and is_critical:
+            print(f"\n⚠️  Critical step failed ({script_name}). Stopping pipeline.")
             break
 
-    # Final summary
     end_time = datetime.now()
     duration = (end_time - start_time).seconds // 60
     print(f"""
 ╔══════════════════════════════════════════════════════╗
-║     📊 DAILY RUN COMPLETE — {duration} minutes                ║
+║     📊 DAILY RUN COMPLETE — {duration} min                    ║
 ╚══════════════════════════════════════════════════════╝
 """)
     for step, status in results.items():
         print(f"  {status}  {step}")
 
-    # Save daily log
     log_entry = {
         "date": start_time.strftime("%Y-%m-%d"),
         "start": start_time.strftime("%H:%M"),
         "end": end_time.strftime("%H:%M"),
         "duration_min": duration,
-        "steps": results
+        "steps": results,
     }
     log_file = os.path.join(LOG_DIR, "daily_run.json")
     logs = []
@@ -108,8 +97,9 @@ def main():
     with open(log_file, "w") as f:
         json.dump(logs[-30:], f, indent=2)
 
-    print(f"\n📁 Output folder: {os.path.join(SCRIPTS_DIR, '../output/videos')}")
-    print(f"📋 Run log saved to: {log_file}")
+    print(f"\n📁 Videos : {os.path.join(SCRIPTS_DIR, '../output/videos')}")
+    print(f"📋 Run log: {log_file}")
+
 
 if __name__ == "__main__":
     main()
