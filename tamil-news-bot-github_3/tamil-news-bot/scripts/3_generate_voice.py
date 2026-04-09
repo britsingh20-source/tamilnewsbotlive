@@ -81,14 +81,14 @@ def humanize_text_for_tts(text: str) -> str:
 def post_process_audio(input_path: str, output_path: str) -> str:
     """
     ffmpeg audio filter chain:
-      - volume=2.0    : +6dB boost (louder, broadcast level)
+      - volume=4.0    : +6dB boost (louder, broadcast level)
       - equalizer 180Hz +3dB  : bass warmth
       - equalizer 3000Hz +3dB : presence/clarity for Tamil consonants
       - acompressor   : even out volume peaks
       - atempo=1.10   : 10% faster = energetic news delivery pace
     """
     filter_chain = (
-        "volume=2.0,"
+        "volume=4.0,"
         "equalizer=f=180:width_type=o:width=2:g=3,"
         "equalizer=f=3000:width_type=o:width=2:g=3,"
         "acompressor=threshold=0.089:ratio=4:attack=5:release=50,"
