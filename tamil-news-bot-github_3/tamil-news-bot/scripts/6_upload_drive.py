@@ -3,8 +3,10 @@ STEP 6: Upload Videos to Google Drive
 =======================================
 - Uploads all rendered videos to Google Drive
 - Sets each file to publicly shareable (anyone with link can download)
-- Saves shareable links to a JSON manifest
-- Uses Google Drive API with service account (no OAuth needed)
+- Saves shareable links to logs/drive_links.json
+- Supports BOTH:
+    GOOGLE_SERVICE_ACCOUNT_FILE  (file path  — used by GitHub Actions)
+    GOOGLE_SERVICE_ACCOUNT_JSON  (raw JSON string — used locally)
 """
 
 import json, os, sys
@@ -15,54 +17,57 @@ try:
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaFileUpload
 except ImportError:
-    print("ERROR: google-api-python-client not installed.")
+    print("ERROR: pip install google-api-python-client google-auth")
     sys.exit(1)
 
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-SCRIPTS_DIR = os.path.dirname(__file__)
+SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 VIDEO_DIR   = os.path.join(SCRIPTS_DIR, "../output/videos")
 LOGS_DIR    = os.path.join(SCRIPTS_DIR, "../logs")
 
-# Google Drive folder name to upload into (will be created if not exists)
 DRIVE_FOLDER_NAME = "TamilNewsBot"
-
-# Service account JSON — passed via environment variable
-SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
-
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 
 
 # ===========================================================================
-# Authenticate
+# Authenticate — file path takes priority, falls back to raw JSON string
 # ===========================================================================
 def get_drive_service():
-    if not SERVICE_ACCOUNT_JSON:
-        print("ERROR: GOOGLE_SERVICE_ACCOUNT_JSON env var not set")
+    sa_file = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE", "")
+    sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+
+    if sa_file and os.path.exists(sa_file):
+        # GitHub Actions path: credentials already written to /tmp/google_credentials.json
+        credentials = service_account.Credentials.from_service_account_file(
+            sa_file, scopes=SCOPES
+        )
+        print(f"  [Drive] Authenticated via file: {sa_file}")
+
+    elif sa_json:
+        # Local path: raw JSON string in env var
+        import tempfile
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+        tmp.write(sa_json)
+        tmp.close()
+        credentials = service_account.Credentials.from_service_account_file(
+            tmp.name, scopes=SCOPES
+        )
+        os.unlink(tmp.name)
+        print("  [Drive] Authenticated via JSON env var")
+
+    else:
+        print("ERROR: Set GOOGLE_SERVICE_ACCOUNT_FILE or GOOGLE_SERVICE_ACCOUNT_JSON")
         sys.exit(1)
 
-    import tempfile
-    # Write JSON to temp file (service account needs a file path)
-    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
-    tmp.write(SERVICE_ACCOUNT_JSON)
-    tmp.close()
-
-    credentials = service_account.Credentials.from_service_account_file(
-        tmp.name, scopes=SCOPES
-    )
-    os.unlink(tmp.name)
-
-    service = build("drive", "v3", credentials=credentials)
-    print("  [Drive] Authenticated via service account")
-    return service
+    return build("drive", "v3", credentials=credentials)
 
 
 # ===========================================================================
-# Get or create folder in Drive
+# Get or create Drive folder
 # ===========================================================================
 def get_or_create_folder(service, folder_name: str) -> str:
-    # Search for existing folder
     query = (
         f"name='{folder_name}' "
         f"and mimeType='application/vnd.google-apps.folder' "
@@ -76,16 +81,14 @@ def get_or_create_folder(service, folder_name: str) -> str:
         print(f"  [Drive] Using existing folder: {folder_name} ({folder_id})")
         return folder_id
 
-    # Create new folder
     folder_meta = {
         "name":     folder_name,
         "mimeType": "application/vnd.google-apps.folder",
     }
-    folder = service.files().create(body=folder_meta, fields="id").execute()
+    folder    = service.files().create(body=folder_meta, fields="id").execute()
     folder_id = folder["id"]
     print(f"  [Drive] Created folder: {folder_name} ({folder_id})")
 
-    # Make folder itself publicly viewable
     service.permissions().create(
         fileId=folder_id,
         body={"type": "anyone", "role": "reader"},
@@ -95,7 +98,7 @@ def get_or_create_folder(service, folder_name: str) -> str:
 
 
 # ===========================================================================
-# Upload one video and return shareable link
+# Upload one video and return metadata
 # ===========================================================================
 def upload_video(service, file_path: str, folder_id: str) -> dict:
     file_name = os.path.basename(file_path)
@@ -103,13 +106,10 @@ def upload_video(service, file_path: str, folder_id: str) -> dict:
 
     print(f"  [Drive] Uploading: {file_name} ({file_size:.1f} MB)...")
 
-    file_meta = {
-        "name":    file_name,
-        "parents": [folder_id],
-    }
-    media = MediaFileUpload(file_path, mimetype="video/mp4", resumable=True)
+    file_meta = {"name": file_name, "parents": [folder_id]}
+    media     = MediaFileUpload(file_path, mimetype="video/mp4", resumable=True)
 
-    uploaded = service.files().create(
+    uploaded  = service.files().create(
         body=file_meta,
         media_body=media,
         fields="id, name, size",
@@ -117,17 +117,15 @@ def upload_video(service, file_path: str, folder_id: str) -> dict:
 
     file_id = uploaded["id"]
 
-    # Set permission: anyone with link can view/download
     service.permissions().create(
         fileId=file_id,
         body={"type": "anyone", "role": "reader"},
     ).execute()
 
-    # Build shareable links
     view_link     = f"https://drive.google.com/file/d/{file_id}/view?usp=sharing"
     download_link = f"https://drive.google.com/uc?export=download&id={file_id}"
 
-    print(f"  [Drive] ✅ Uploaded: {file_name}")
+    print(f"  [Drive] ✅ {file_name}")
     print(f"  [Drive]    View:     {view_link}")
     print(f"  [Drive]    Download: {download_link}")
 
@@ -150,7 +148,6 @@ def main():
     print(f"Time      : {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print(f"Video dir : {VIDEO_DIR}")
 
-    # Load video manifest
     manifest_path = os.path.join(VIDEO_DIR, "manifest.json")
     if not os.path.exists(manifest_path):
         print(f"ERROR: {manifest_path} not found — run 4_create_video.py first")
@@ -166,13 +163,9 @@ def main():
 
     print(f"Videos to upload: {len(videos)}")
 
-    # Authenticate
-    service = get_drive_service()
-
-    # Get/create folder
+    service   = get_drive_service()
     folder_id = get_or_create_folder(service, DRIVE_FOLDER_NAME)
 
-    # Upload each video
     uploaded = []
     for v in videos:
         video_path = v.get("video_file", "")
@@ -180,13 +173,12 @@ def main():
             print(f"  SKIP: file not found: {video_path}")
             continue
         try:
-            result = upload_video(service, video_path, folder_id)
+            result          = upload_video(service, video_path, folder_id)
             result["topic"] = v.get("topic", "")
             uploaded.append(result)
         except Exception as e:
             print(f"  ERROR uploading {video_path}: {e}")
 
-    # Save results
     os.makedirs(LOGS_DIR, exist_ok=True)
     output = {
         "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -201,10 +193,9 @@ def main():
         json.dump(output, f, ensure_ascii=False, indent=2)
 
     print(f"\n{'='*65}")
-    print(f"DONE: {len(uploaded)}/{len(videos)} videos uploaded to Google Drive")
-    print(f"Links saved to: {links_path}")
+    print(f"DONE: {len(uploaded)}/{len(videos)} videos uploaded")
+    print(f"Links saved: {links_path}")
     print(f"\n📁 Folder: https://drive.google.com/drive/folders/{folder_id}")
-    print("\n📋 Shareable download links:")
     for v in uploaded:
         print(f"  • {v['topic'][:50]}")
         print(f"    {v['download_link']}")
