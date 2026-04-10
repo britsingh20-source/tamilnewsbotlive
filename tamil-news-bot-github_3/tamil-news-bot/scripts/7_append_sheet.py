@@ -2,11 +2,13 @@
 STEP 7: Append Drive Links → Google Sheet
 ==========================================
 - Reads  logs/drive_links.json  (written by 6_upload_drive.py)
-- Scans the Drive-URL column (col C) top-to-bottom
-- Finds the LAST row that already has a Drive URL
-- Appends new video rows BELOW that last URL row (never overwrites)
+- Scans Drive-URL column (col C) top-to-bottom
+- Appends new rows BELOW the last existing Drive URL row
 - Sets Status  = "Pending"
 - Sets Publish = "Pending"
+- Supports BOTH:
+    GOOGLE_SERVICE_ACCOUNT_FILE  (file path  — GitHub Actions)
+    GOOGLE_SERVICE_ACCOUNT_JSON  (raw JSON   — local)
 
 Sheet columns (A–H)
 --------------------
@@ -16,8 +18,8 @@ C  Drive View URL        ← scanned for existing entries
 D  Drive Download URL
 E  Size (MB)
 F  File ID
-G  Status               ← written as "Pending"
-H  Publish              ← written as "Pending"
+G  Status               ← "Pending"
+H  Publish              ← "Pending"
 """
 
 import json, os, sys, tempfile
@@ -31,22 +33,18 @@ except ImportError:
     sys.exit(1)
 
 # ─────────────────────────────────────────────────────────────
-# CONFIG  — set env vars or edit defaults below
+# CONFIG
 # ─────────────────────────────────────────────────────────────
-SPREADSHEET_ID       = os.environ.get("GOOGLE_SHEET_ID",  "YOUR_SPREADSHEET_ID_HERE")
-SHEET_TAB_NAME       = os.environ.get("GOOGLE_SHEET_TAB", "VideoLinks")
-SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+SPREADSHEET_ID = os.environ.get("GOOGLE_SHEET_ID",  "YOUR_SPREADSHEET_ID_HERE")
+SHEET_TAB_NAME = os.environ.get("GOOGLE_SHEET_TAB", "VideoLinks")
 
-# Column positions (0-indexed)
-COL_DATE         = 0   # A
-COL_TOPIC        = 1   # B
-COL_VIEW_URL     = 2   # C  ← Drive view link; checked for existing entries
-COL_DOWNLOAD_URL = 3   # D
-COL_SIZE_MB      = 4   # E
-COL_FILE_ID      = 5   # F
-COL_STATUS       = 6   # G  → "Pending"
-COL_PUBLISH      = 7   # H  → "Pending"
-TOTAL_COLS       = 8
+COL_DATE, COL_TOPIC       = 0, 1   # A, B
+COL_VIEW_URL              = 2      # C ← checked for existing URLs
+COL_DOWNLOAD_URL          = 3      # D
+COL_SIZE_MB, COL_FILE_ID  = 4, 5   # E, F
+COL_STATUS                = 6      # G → "Pending"
+COL_PUBLISH               = 7      # H → "Pending"
+TOTAL_COLS                = 8
 
 HEADER = [
     "Date", "Topic",
@@ -61,19 +59,29 @@ LINKS_FILE  = os.path.join(LOGS_DIR, "drive_links.json")
 SCOPES      = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
-# ── Auth ──────────────────────────────────────────────────────
+# ── Auth (file path OR raw JSON) ──────────────────────────────
 def get_service():
-    if not SERVICE_ACCOUNT_JSON:
-        print("ERROR: GOOGLE_SERVICE_ACCOUNT_JSON env var not set")
+    sa_file = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE", "")
+    sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+
+    if sa_file and os.path.exists(sa_file):
+        creds = service_account.Credentials.from_service_account_file(
+            sa_file, scopes=SCOPES
+        )
+        print(f"  [Sheets] Authenticated via file: {sa_file}")
+    elif sa_json:
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+        tmp.write(sa_json)
+        tmp.close()
+        creds = service_account.Credentials.from_service_account_file(
+            tmp.name, scopes=SCOPES
+        )
+        os.unlink(tmp.name)
+        print("  [Sheets] Authenticated via JSON env var")
+    else:
+        print("ERROR: Set GOOGLE_SERVICE_ACCOUNT_FILE or GOOGLE_SERVICE_ACCOUNT_JSON")
         sys.exit(1)
-    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
-    tmp.write(SERVICE_ACCOUNT_JSON)
-    tmp.close()
-    creds = service_account.Credentials.from_service_account_file(
-        tmp.name, scopes=SCOPES
-    )
-    os.unlink(tmp.name)
-    print("  [Sheets] Authenticated")
+
     return build("sheets", "v4", credentials=creds)
 
 
@@ -108,14 +116,9 @@ def ensure_tab_and_header(svc, sid, tab):
         print("  [Sheets] Header row written")
 
 
-# ── Find insert row ───────────────────────────────────────────
+# ── Find insert row (below last existing Drive URL) ───────────
 def find_insert_row(rows: list) -> int:
-    """
-    Returns the 1-based sheet row number to insert at.
-    Scans col C (Drive URL) and places new rows BELOW the last existing URL.
-    If no URLs exist yet, inserts at row 2 (just after header).
-    """
-    last_url_row = 1  # header is row 1
+    last_url_row = 1   # header = row 1
     for i, row in enumerate(rows):
         sheet_row = i + 1
         if sheet_row == 1:
@@ -129,10 +132,9 @@ def find_insert_row(rows: list) -> int:
 # ── Write rows at exact position ──────────────────────────────
 def write_rows_at(svc, sid, tab, start_row, rows):
     end_row  = start_row + len(rows) - 1
-    range_a1 = f"{tab}!A{start_row}:H{end_row}"
     svc.spreadsheets().values().update(
         spreadsheetId=sid,
-        range=range_a1,
+        range=f"{tab}!A{start_row}:H{end_row}",
         valueInputOption="USER_ENTERED",
         body={"values": rows},
     ).execute()
@@ -154,7 +156,7 @@ def main():
 
     videos = data.get("videos", [])
     if not videos:
-        print("No videos in drive_links.json — nothing to append")
+        print("No videos — nothing to append")
         sys.exit(0)
 
     uploaded_at = data.get("uploaded_at", datetime.now().strftime("%Y-%m-%d %H:%M"))
@@ -162,7 +164,6 @@ def main():
     print(f"Sheet ID  : {SPREADSHEET_ID}")
     print(f"Tab       : {SHEET_TAB_NAME}")
 
-    # Build rows — Status + Publish both set to "Pending"
     new_rows = []
     for v in videos:
         row = [""] * TOTAL_COLS
@@ -182,11 +183,11 @@ def main():
     existing  = read_all_rows(svc, SPREADSHEET_ID, SHEET_TAB_NAME)
     insert_at = find_insert_row(existing)
 
-    print(f"  [Sheets] Last URL row : {insert_at - 1}  →  inserting at row {insert_at}")
+    print(f"  [Sheets] Last URL at row {insert_at - 1} → inserting at row {insert_at}")
     write_rows_at(svc, SPREADSHEET_ID, SHEET_TAB_NAME, insert_at, new_rows)
 
     print(f"\n{'='*65}")
-    print(f"DONE: {len(new_rows)} row(s) added  |  Status=Pending  |  Publish=Pending")
+    print(f"DONE: {len(new_rows)} row(s) — Status=Pending | Publish=Pending")
     print(f"Sheet: https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}")
     for v in videos:
         print(f"  • {v.get('topic','')[:55]}")
