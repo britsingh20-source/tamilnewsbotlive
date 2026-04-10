@@ -36,6 +36,7 @@ jobs:
           pip install opencv-python-headless
           pip install librosa==0.10.1 numba==0.58.1
           pip install pydrive2 oauth2client
+          pip install google-api-python-client google-auth
 
       - name: Install Wav2Lip dependencies
         run: |
@@ -149,18 +150,23 @@ jobs:
 
       - name: Run News Bot
         env:
-          OPENAI_API_KEY:          ${{ secrets.OPENAI_API_KEY }}
-          PEXELS_API_KEY:          ${{ secrets.PEXELS_API_KEY }}
-          PIXABAY_API_KEY:         ${{ secrets.PIXABAY_API_KEY }}
-          IG_ACCESS_TOKEN:         ${{ secrets.IG_ACCESS_TOKEN }}
-          IG_BUSINESS_ID:          ${{ secrets.IG_BUSINESS_ID }}
-          CLOUDINARY_CLOUD_NAME:   ${{ secrets.CLOUDINARY_CLOUD_NAME }}
-          CLOUDINARY_API_KEY:      ${{ secrets.CLOUDINARY_API_KEY }}
-          CLOUDINARY_API_SECRET:   ${{ secrets.CLOUDINARY_API_SECRET }}
-          GOOGLE_DRIVE_FOLDER_ID:  ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
-          GOOGLE_CREDENTIALS_JSON: /tmp/google_credentials.json
-          SADTALKER_DIR:           /tmp/SadTalker
-          WAV2LIP_DIR:             /tmp/Wav2Lip
+          OPENAI_API_KEY:              ${{ secrets.OPENAI_API_KEY }}
+          PEXELS_API_KEY:              ${{ secrets.PEXELS_API_KEY }}
+          PIXABAY_API_KEY:             ${{ secrets.PIXABAY_API_KEY }}
+          IG_ACCESS_TOKEN:             ${{ secrets.IG_ACCESS_TOKEN }}
+          IG_BUSINESS_ID:              ${{ secrets.IG_BUSINESS_ID }}
+          CLOUDINARY_CLOUD_NAME:       ${{ secrets.CLOUDINARY_CLOUD_NAME }}
+          CLOUDINARY_API_KEY:          ${{ secrets.CLOUDINARY_API_KEY }}
+          CLOUDINARY_API_SECRET:       ${{ secrets.CLOUDINARY_API_SECRET }}
+          GOOGLE_DRIVE_FOLDER_ID:      ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
+          GOOGLE_CREDENTIALS_JSON:     /tmp/google_credentials.json
+          # ── NEW: Google Drive upload + Google Sheet logging ──────────
+          GOOGLE_SERVICE_ACCOUNT_FILE: /tmp/google_credentials.json
+          GOOGLE_SHEET_ID:             ${{ secrets.GOOGLE_SHEET_ID }}
+          GOOGLE_SHEET_TAB:            VideoLinks
+          # ────────────────────────────────────────────────────────────
+          SADTALKER_DIR:               /tmp/SadTalker
+          WAV2LIP_DIR:                 /tmp/Wav2Lip
         run: |
           python tamil-news-bot-github_3/tamil-news-bot/scripts/run_all.py
 
@@ -170,6 +176,7 @@ jobs:
           echo "=== Videos ===" && ls -lh tamil-news-bot-github_3/tamil-news-bot/output/videos/ || echo "No videos"
           echo "=== Audio ===" && ls -lh tamil-news-bot-github_3/tamil-news-bot/output/audio/ || echo "No audio"
           echo "=== Logs ===" && cat tamil-news-bot-github_3/tamil-news-bot/logs/posting_log.json || echo "No posting log"
+          echo "=== Drive Links ===" && cat tamil-news-bot-github_3/tamil-news-bot/logs/drive_links.json || echo "No drive links log"
 
       - name: Upload videos as artifact (backup)
         if: always()
