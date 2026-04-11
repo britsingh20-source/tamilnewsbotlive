@@ -2,7 +2,7 @@
 STEP 7: Append Drive Links → Google Sheet
 ==========================================
 - Reads  logs/drive_links.json  (written by 6_upload_drive.py)
-- Scans Drive-URL column (col C) top-to-bottom
+- Scans Drive-URL column (col B) top-to-bottom
 - Appends new rows BELOW the last existing Drive URL row
 - Sets Status  = "Pending"
 - Sets Publish = "Pending"
@@ -10,16 +10,21 @@ STEP 7: Append Drive Links → Google Sheet
     GOOGLE_SERVICE_ACCOUNT_FILE  (file path  — GitHub Actions)
     GOOGLE_SERVICE_ACCOUNT_JSON  (raw JSON   — local)
 
-Sheet columns (A–H)
+Sheet columns (A–M)
 --------------------
-A  Date
-B  Topic
-C  Drive View URL        ← scanned for existing entries
-D  Drive Download URL
-E  Size (MB)
-F  File ID
-G  Status               ← "Pending"
-H  Publish              ← "Pending"
+A  sno
+B  drive_url             ← scanned for existing entries
+C  status
+D  executed_at
+E  Video Url
+F  l captions
+G  l hashtag
+H  y title
+I  y captions
+J  y hashtag
+K  f captions
+L  f hashtag
+M  Publish
 """
 
 import json, os, sys, tempfile
@@ -38,19 +43,26 @@ except ImportError:
 SPREADSHEET_ID = os.environ.get("GOOGLE_SHEET_ID",  "YOUR_SPREADSHEET_ID_HERE")
 SHEET_TAB_NAME = os.environ.get("GOOGLE_SHEET_TAB", "VideoLinks")
 
-COL_DATE, COL_TOPIC       = 0, 1   # A, B
-COL_VIEW_URL              = 2      # C ← checked for existing URLs
-COL_DOWNLOAD_URL          = 3      # D
-COL_SIZE_MB, COL_FILE_ID  = 4, 5   # E, F
-COL_STATUS                = 6      # G → "Pending"
-COL_PUBLISH               = 7      # H → "Pending"
-TOTAL_COLS                = 8
+COL_SNO         = 0   # A
+COL_DRIVE_URL   = 1   # B ← checked for existing URLs
+COL_STATUS      = 2   # C → "Pending"
+COL_EXECUTED_AT = 3   # D
+COL_VIDEO_URL   = 4   # E
+COL_L_CAPTIONS  = 5   # F
+COL_L_HASHTAG   = 6   # G
+COL_Y_TITLE     = 7   # H
+COL_Y_CAPTIONS  = 8   # I
+COL_Y_HASHTAG   = 9   # J
+COL_F_CAPTIONS  = 10  # K
+COL_F_HASHTAG   = 11  # L
+COL_PUBLISH     = 12  # M → "Pending"
+TOTAL_COLS      = 13
 
 HEADER = [
-    "Date", "Topic",
-    "Drive View URL", "Drive Download URL",
-    "Size (MB)", "File ID",
-    "Status", "Publish",
+    "sno", "drive_url", "status", "executed_at",
+    "Video Url", "l captions", "l hashtag",
+    "y title", "y captions", "y hashtag",
+    "f captions", "f hashtag", "Publish",
 ]
 
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -88,7 +100,7 @@ def get_service():
 # ── Read all rows ─────────────────────────────────────────────
 def read_all_rows(svc, sid, tab):
     res = svc.spreadsheets().values().get(
-        spreadsheetId=sid, range=f"{tab}!A:H"
+        spreadsheetId=sid, range=f"{tab}!A:M"
     ).execute()
     return res.get("values", [])
 
@@ -123,18 +135,33 @@ def find_insert_row(rows: list) -> int:
         sheet_row = i + 1
         if sheet_row == 1:
             continue
-        cell = row[COL_VIEW_URL].strip() if len(row) > COL_VIEW_URL else ""
+        cell = row[COL_DRIVE_URL].strip() if len(row) > COL_DRIVE_URL else ""
         if cell.startswith("http"):
             last_url_row = sheet_row
     return last_url_row + 1
 
 
+# ── Get next sno (based on last row's sno) ────────────────────
+def get_next_sno(rows: list) -> int:
+    last_sno = 0
+    for i, row in enumerate(rows):
+        if i == 0:
+            continue  # skip header
+        try:
+            val = int(row[COL_SNO]) if len(row) > COL_SNO and row[COL_SNO] else 0
+            if val > last_sno:
+                last_sno = val
+        except (ValueError, TypeError):
+            pass
+    return last_sno + 1
+
+
 # ── Write rows at exact position ──────────────────────────────
 def write_rows_at(svc, sid, tab, start_row, rows):
-    end_row  = start_row + len(rows) - 1
+    end_row = start_row + len(rows) - 1
     svc.spreadsheets().values().update(
         spreadsheetId=sid,
-        range=f"{tab}!A{start_row}:H{end_row}",
+        range=f"{tab}!A{start_row}:M{end_row}",
         valueInputOption="USER_ENTERED",
         body={"values": rows},
     ).execute()
@@ -164,24 +191,30 @@ def main():
     print(f"Sheet ID  : {SPREADSHEET_ID}")
     print(f"Tab       : {SHEET_TAB_NAME}")
 
-    new_rows = []
-    for v in videos:
-        row = [""] * TOTAL_COLS
-        row[COL_DATE]         = uploaded_at
-        row[COL_TOPIC]        = v.get("topic", "")
-        row[COL_VIEW_URL]     = v.get("view_link", "")
-        row[COL_DOWNLOAD_URL] = v.get("download_link", "")
-        row[COL_SIZE_MB]      = str(v.get("size_mb", ""))
-        row[COL_FILE_ID]      = v.get("file_id", "")
-        row[COL_STATUS]       = "Pending"
-        row[COL_PUBLISH]      = "Pending"
-        new_rows.append(row)
-
     svc = get_service()
     ensure_tab_and_header(svc, SPREADSHEET_ID, SHEET_TAB_NAME)
 
     existing  = read_all_rows(svc, SPREADSHEET_ID, SHEET_TAB_NAME)
     insert_at = find_insert_row(existing)
+    next_sno  = get_next_sno(existing)
+
+    new_rows = []
+    for i, v in enumerate(videos):
+        row = [""] * TOTAL_COLS
+        row[COL_SNO]         = next_sno + i
+        row[COL_DRIVE_URL]   = v.get("view_link", "")
+        row[COL_STATUS]      = "Pending"
+        row[COL_EXECUTED_AT] = uploaded_at
+        row[COL_VIDEO_URL]   = ""                    # filled later (YouTube URL)
+        row[COL_L_CAPTIONS]  = ""                    # Instagram captions
+        row[COL_L_HASHTAG]   = ""                    # Instagram hashtags
+        row[COL_Y_TITLE]     = v.get("topic", "")
+        row[COL_Y_CAPTIONS]  = ""                    # YouTube captions
+        row[COL_Y_HASHTAG]   = ""                    # YouTube hashtags
+        row[COL_F_CAPTIONS]  = ""                    # Facebook captions
+        row[COL_F_HASHTAG]   = ""                    # Facebook hashtags
+        row[COL_PUBLISH]     = "Pending"
+        new_rows.append(row)
 
     print(f"  [Sheets] Last URL at row {insert_at - 1} → inserting at row {insert_at}")
     write_rows_at(svc, SPREADSHEET_ID, SHEET_TAB_NAME, insert_at, new_rows)
