@@ -1,136 +1,88 @@
 """
-STEP 6: Upload Videos to Google Drive
-=======================================
-- Uploads into a user-owned folder shared with the service account
-  (avoids the "Service Accounts have no storage quota" 403 error)
-- Sets each file to publicly shareable (anyone with link)
-- Saves shareable links to logs/drive_links.json
+STEP 6: Upload Videos to Cloudinary
+=====================================
+- Uploads all rendered videos to Cloudinary (free tier = 25GB storage)
+- Gets a public playable/downloadable URL for each video
+- Saves links to logs/drive_links.json
+- Uses CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET
+  (already in your GitHub secrets)
 """
 
-import json, os, sys
+import json, os, sys, urllib.request, urllib.parse, hmac, hashlib, time
 from datetime import datetime
 
-try:
-    from google.oauth2 import service_account
-    from googleapiclient.discovery import build
-    from googleapiclient.http import MediaFileUpload
-except ImportError:
-    print("ERROR: pip install google-api-python-client google-auth")
-    sys.exit(1)
-
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 VIDEO_DIR   = os.path.join(SCRIPTS_DIR, "../output/videos")
 LOGS_DIR    = os.path.join(SCRIPTS_DIR, "../logs")
 
-# ---------------------------------------------------------------------------
-# Folder resolution (priority order):
-#   1. GOOGLE_DRIVE_FOLDER_ID env var  ← YOUR shared folder ID  ✅ use this
-#   2. Create a new folder (fails for service accounts without quota)
-# ---------------------------------------------------------------------------
-DRIVE_FOLDER_ID   = os.environ.get("GOOGLE_DRIVE_FOLDER_ID", "")
-DRIVE_FOLDER_NAME = "TamilNewsBot"   # used only if creating a new folder
-
-SCOPES = ["https://www.googleapis.com/auth/drive"]
+CLOUD_NAME  = os.environ.get("CLOUDINARY_CLOUD_NAME", "")
+API_KEY     = os.environ.get("CLOUDINARY_API_KEY", "")
+API_SECRET  = os.environ.get("CLOUDINARY_API_SECRET", "")
 
 
 # ===========================================================================
-# Authenticate — file path OR raw JSON string
+# Upload one video to Cloudinary using signed upload (no SDK needed)
 # ===========================================================================
-def get_drive_service():
-    sa_file = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE", "")
-    sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+def upload_video(file_path: str, folder: str = "TamilNewsBot") -> dict:
+    file_name  = os.path.basename(file_path)
+    file_size  = os.path.getsize(file_path) / 1024 / 1024
+    public_id  = f"{folder}/{os.path.splitext(file_name)[0]}"
+    timestamp  = str(int(time.time()))
 
-    if sa_file and os.path.exists(sa_file):
-        creds = service_account.Credentials.from_service_account_file(
-            sa_file, scopes=SCOPES
-        )
-        print(f"  [Drive] Authenticated via file: {sa_file}")
-    elif sa_json:
-        import tempfile
-        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
-        tmp.write(sa_json)
-        tmp.close()
-        creds = service_account.Credentials.from_service_account_file(
-            tmp.name, scopes=SCOPES
-        )
-        os.unlink(tmp.name)
-        print("  [Drive] Authenticated via JSON env var")
-    else:
-        print("ERROR: Set GOOGLE_SERVICE_ACCOUNT_FILE or GOOGLE_SERVICE_ACCOUNT_JSON")
-        sys.exit(1)
+    print(f"  [Cloudinary] Uploading: {file_name} ({file_size:.1f} MB)...")
 
-    return build("drive", "v3", credentials=creds)
+    # Build signature
+    params_to_sign = f"public_id={public_id}&timestamp={timestamp}"
+    signature = hmac.new(
+        API_SECRET.encode(), params_to_sign.encode(), hashlib.sha1
+    ).hexdigest()
 
+    # Multipart upload using urllib (no extra packages)
+    boundary = "----CloudinaryBoundary"
+    fields = {
+        "api_key":   API_KEY,
+        "timestamp": timestamp,
+        "public_id": public_id,
+        "signature": signature,
+    }
 
-# ===========================================================================
-# Resolve folder — use env var ID first (shared folder in user's Drive)
-# ===========================================================================
-def resolve_folder(service) -> str:
-    if DRIVE_FOLDER_ID:
-        print(f"  [Drive] Using shared folder from env: {DRIVE_FOLDER_ID}")
-        print(f"  [Drive] ⚠️  Make sure this folder is shared with the service account!")
-        return DRIVE_FOLDER_ID
+    body  = b""
+    for k, v in fields.items():
+        body += f"--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n".encode()
 
-    # Fallback: try to find or create (only works on Shared Drives / Workspace)
-    print(f"  [Drive] GOOGLE_DRIVE_FOLDER_ID not set — searching for '{DRIVE_FOLDER_NAME}'...")
-    query = (
-        f"name='{DRIVE_FOLDER_NAME}' "
-        f"and mimeType='application/vnd.google-apps.folder' "
-        f"and trashed=false"
+    with open(file_path, "rb") as f:
+        video_data = f.read()
+
+    body += f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{file_name}\"\r\nContent-Type: video/mp4\r\n\r\n".encode()
+    body += video_data
+    body += f"\r\n--{boundary}--\r\n".encode()
+
+    url = f"https://api.cloudinary.com/v1_1/{CLOUD_NAME}/video/upload"
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        method="POST",
     )
-    results = service.files().list(q=query, fields="files(id, name)").execute()
-    files   = results.get("files", [])
 
-    if files:
-        folder_id = files[0]["id"]
-        print(f"  [Drive] Found folder: {DRIVE_FOLDER_NAME} ({folder_id})")
-        return folder_id
+    try:
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            result = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode()
+        raise Exception(f"HTTP {e.code}: {error_body}")
 
-    print("ERROR: No GOOGLE_DRIVE_FOLDER_ID set and no existing folder found.")
-    print("Fix: Create a folder in YOUR Google Drive, share it with the service")
-    print("     account email (Editor), then set GOOGLE_DRIVE_FOLDER_ID secret.")
-    sys.exit(1)
+    secure_url   = result.get("secure_url", "")
+    view_link    = secure_url
+    download_link = secure_url.replace("/upload/", "/upload/fl_attachment/")
 
-
-# ===========================================================================
-# Upload one video
-# ===========================================================================
-def upload_video(service, file_path: str, folder_id: str) -> dict:
-    file_name = os.path.basename(file_path)
-    file_size = os.path.getsize(file_path) / 1024 / 1024
-
-    print(f"  [Drive] Uploading: {file_name} ({file_size:.1f} MB)...")
-
-    file_meta = {"name": file_name, "parents": [folder_id]}
-    media     = MediaFileUpload(file_path, mimetype="video/mp4", resumable=True)
-
-    uploaded = service.files().create(
-        body=file_meta,
-        media_body=media,
-        fields="id, name, size",
-    ).execute()
-
-    file_id = uploaded["id"]
-
-    # Make publicly accessible (anyone with link)
-    service.permissions().create(
-        fileId=file_id,
-        body={"type": "anyone", "role": "reader"},
-    ).execute()
-
-    view_link     = f"https://drive.google.com/file/d/{file_id}/view?usp=sharing"
-    download_link = f"https://drive.google.com/uc?export=download&id={file_id}"
-
-    print(f"  [Drive] ✅ Uploaded: {file_name}")
-    print(f"  [Drive]    View:     {view_link}")
-    print(f"  [Drive]    Download: {download_link}")
+    print(f"  [Cloudinary] ✅ Uploaded: {file_name}")
+    print(f"  [Cloudinary]    View:     {view_link}")
+    print(f"  [Cloudinary]    Download: {download_link}")
 
     return {
         "file_name":     file_name,
-        "file_id":       file_id,
+        "public_id":     result.get("public_id", ""),
         "size_mb":       round(file_size, 1),
         "view_link":     view_link,
         "download_link": download_link,
@@ -142,10 +94,20 @@ def upload_video(service, file_path: str, folder_id: str) -> dict:
 # ===========================================================================
 def main():
     print("=" * 65)
-    print("Step 6: Upload Videos to Google Drive")
+    print("Step 6: Upload Videos to Cloudinary")
     print("=" * 65)
     print(f"Time      : {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    print(f"Video dir : {VIDEO_DIR}")
+
+    if not all([CLOUD_NAME, API_KEY, API_SECRET]):
+        missing = [k for k, v in {
+            "CLOUDINARY_CLOUD_NAME":  CLOUD_NAME,
+            "CLOUDINARY_API_KEY":     API_KEY,
+            "CLOUDINARY_API_SECRET":  API_SECRET,
+        }.items() if not v]
+        print(f"ERROR: Missing env vars: {', '.join(missing)}")
+        sys.exit(1)
+
+    print(f"Cloud     : {CLOUD_NAME}")
 
     manifest_path = os.path.join(VIDEO_DIR, "manifest.json")
     if not os.path.exists(manifest_path):
@@ -162,9 +124,6 @@ def main():
 
     print(f"Videos to upload: {len(videos)}")
 
-    service   = get_drive_service()
-    folder_id = resolve_folder(service)
-
     uploaded = []
     for v in videos:
         video_path = v.get("video_file", "")
@@ -172,7 +131,7 @@ def main():
             print(f"  SKIP: file not found: {video_path}")
             continue
         try:
-            result          = upload_video(service, video_path, folder_id)
+            result          = upload_video(video_path)
             result["topic"] = v.get("topic", "")
             uploaded.append(result)
         except Exception as e:
@@ -181,7 +140,8 @@ def main():
     os.makedirs(LOGS_DIR, exist_ok=True)
     output = {
         "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "folder_id":   folder_id,
+        "platform":    "cloudinary",
+        "cloud_name":  CLOUD_NAME,
         "count":       len(uploaded),
         "videos":      uploaded,
     }
@@ -191,13 +151,11 @@ def main():
         json.dump(output, f, ensure_ascii=False, indent=2)
 
     print(f"\n{'='*65}")
-    print(f"DONE: {len(uploaded)}/{len(videos)} videos uploaded to Google Drive")
+    print(f"DONE: {len(uploaded)}/{len(videos)} videos uploaded to Cloudinary")
     print(f"Links saved: {links_path}")
-    if uploaded:
-        print(f"\n📁 Folder: https://drive.google.com/drive/folders/{folder_id}")
-        for v in uploaded:
-            print(f"  • {v['topic'][:50]}")
-            print(f"    {v['download_link']}")
+    for v in uploaded:
+        print(f"  • {v['topic'][:50]}")
+        print(f"    {v['view_link']}")
 
 
 if __name__ == "__main__":
