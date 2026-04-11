@@ -37,6 +37,7 @@ jobs:
           pip install librosa==0.10.1 numba==0.58.1
           pip install pydrive2 oauth2client
           pip install google-api-python-client google-auth
+          pip install boto3
 
       - name: Install Wav2Lip dependencies
         run: |
@@ -62,8 +63,8 @@ jobs:
 
       - name: Write Google credentials JSON
         run: |
-          echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > /tmp/google_credentials.json
-          echo "Google credentials written"
+          printf '%s' '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > /tmp/google_credentials.json
+          python -c "import json; json.load(open('/tmp/google_credentials.json')); print('Google credentials JSON valid ✅')"
 
       - name: Clone SadTalker and download checkpoints
         run: |
@@ -137,6 +138,7 @@ jobs:
       - name: Verify setup
         run: |
           python -c "import torch; print('torch', torch.__version__)"
+          python -c "import boto3; print('boto3 OK', boto3.__version__)"
           python -c "import face_alignment; print('face_alignment OK')" || echo "face_alignment WARN"
           python -c "from pydrive2.auth import GoogleAuth; print('pydrive2 OK')"
           ls /tmp/SadTalker/inference.py && echo "SadTalker OK" || echo "SadTalker MISSING"
@@ -158,13 +160,16 @@ jobs:
           CLOUDINARY_CLOUD_NAME:       ${{ secrets.CLOUDINARY_CLOUD_NAME }}
           CLOUDINARY_API_KEY:          ${{ secrets.CLOUDINARY_API_KEY }}
           CLOUDINARY_API_SECRET:       ${{ secrets.CLOUDINARY_API_SECRET }}
-          GOOGLE_DRIVE_FOLDER_ID:      ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
-          GOOGLE_CREDENTIALS_JSON:     /tmp/google_credentials.json
-          # ── NEW: Google Drive upload + Google Sheet logging ──────────
           GOOGLE_SERVICE_ACCOUNT_FILE: /tmp/google_credentials.json
           GOOGLE_SHEET_ID:             ${{ secrets.GOOGLE_SHEET_ID }}
           GOOGLE_SHEET_TAB:            VideoLinks
-          # ────────────────────────────────────────────────────────────
+          # ── Cloudflare R2 ─────────────────────────────────────────
+          R2_ACCOUNT_ID:               ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID:            ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY:        ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME:              ${{ secrets.R2_BUCKET_NAME }}
+          R2_PUBLIC_URL:               ${{ secrets.R2_PUBLIC_URL }}
+          # ──────────────────────────────────────────────────────────
           SADTALKER_DIR:               /tmp/SadTalker
           WAV2LIP_DIR:                 /tmp/Wav2Lip
         run: |
@@ -176,7 +181,7 @@ jobs:
           echo "=== Videos ===" && ls -lh tamil-news-bot-github_3/tamil-news-bot/output/videos/ || echo "No videos"
           echo "=== Audio ===" && ls -lh tamil-news-bot-github_3/tamil-news-bot/output/audio/ || echo "No audio"
           echo "=== Logs ===" && cat tamil-news-bot-github_3/tamil-news-bot/logs/posting_log.json || echo "No posting log"
-          echo "=== Drive Links ===" && cat tamil-news-bot-github_3/tamil-news-bot/logs/drive_links.json || echo "No drive links log"
+          echo "=== R2 Links ===" && cat tamil-news-bot-github_3/tamil-news-bot/logs/drive_links.json || echo "No R2 links log"
 
       - name: Upload videos as artifact (backup)
         if: always()
