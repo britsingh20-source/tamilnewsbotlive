@@ -88,12 +88,13 @@ def post_process_audio(input_path: str, output_path: str) -> str:
       - atempo=1.10   : 10% faster = energetic news delivery pace
     """
     filter_chain = (
-        "volume=8.0,"
-        "equalizer=f=180:width_type=o:width=2:g=3,"
-        "equalizer=f=3000:width_type=o:width=2:g=3,"
-        "acompressor=threshold=0.089:ratio=4:attack=5:release=50,"
-        "atempo=1.10"
-    )
+        "volume=10dB,"
+    "equalizer=f=180:width_type=o:width=2:g=3,"
+    "equalizer=f=3000:width_type=o:width=2:g=3,"
+    "acompressor=threshold=0.089:ratio=4:attack=5:release=50,"
+    "alimiter=level_in=1:level_out=1:limit=0.95:attack=5:release=50,"
+    "atempo=1.10"
+)
     cmd = [
         "ffmpeg", "-y", "-i", input_path,
         "-af", filter_chain,
