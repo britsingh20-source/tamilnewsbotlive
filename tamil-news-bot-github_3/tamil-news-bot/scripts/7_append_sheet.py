@@ -41,7 +41,7 @@ except ImportError:
 # CONFIG
 # ─────────────────────────────────────────────────────────────
 SPREADSHEET_ID = os.environ.get("GOOGLE_SHEET_ID",  "YOUR_SPREADSHEET_ID_HERE")
-SHEET_TAB_NAME = os.environ.get("GOOGLE_SHEET_TAB", "VideoLinks")
+SHEET_TAB_NAME = os.environ.get("GOOGLE_SHEET_TAB", "tamilnews")
 
 COL_SNO         = 0   # A
 COL_DRIVE_URL   = 1   # B ← checked for existing URLs
