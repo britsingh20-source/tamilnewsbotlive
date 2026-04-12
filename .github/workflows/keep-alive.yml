@@ -1,0 +1,24 @@
+name: Keep Alive
+
+on:
+  schedule:
+    - cron: "0 0 1 * *"  # Runs on the 1st of every month
+  workflow_dispatch:
+
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Keep repository active
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          echo "Last keep-alive: $(date -u)" > .github/keep-alive.txt
+          git add .github/keep-alive.txt
+          git diff --staged --quiet || git commit -m "chore: keep-alive [skip ci]"
+          git push
