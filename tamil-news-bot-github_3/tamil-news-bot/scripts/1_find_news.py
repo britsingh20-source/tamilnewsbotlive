@@ -1,141 +1,169 @@
 """
-STEP 1: Find Trending Tamil News Topics
-- Uses RSS feeds from BBC Tamil, NewsMinute, Hindu Tamil
-- No API key needed - completely free
+STEP 1: Find Trending Coimbatore News Topics
+
+- Fetches Coimbatore-specific news from RSS feeds and Google News
+- Filters for Coimbatore-relevant content
 - Saves top 5 topics to topics.json
 """
 
 import json
 import os
 import requests
+import re
 from datetime import datetime
 import xml.etree.ElementTree as ET
 
 TOPICS_FILE = os.path.join(os.path.dirname(__file__), "../output/topics.json")
 
-# Free RSS feeds - no API key needed
+# Coimbatore-focused RSS / Google News feeds
 RSS_FEEDS = [
     {
-        "name": "BBC Tamil",
-        "url": "https://feeds.bbci.co.uk/tamil/rss.xml"
+        "name": "Google News - Coimbatore",
+        "url": "https://news.google.com/rss/search?q=Coimbatore&hl=en-IN&gl=IN&ceid=IN:en"
     },
     {
-        "name": "News Minute",
-        "url": "https://www.thenewsminute.com/feeds/rss"
+        "name": "Google News - Coimbatore Tamil",
+        "url": "https://news.google.com/rss/search?q=Coimbatore+Tamil+Nadu&hl=en-IN&gl=IN&ceid=IN:en"
     },
     {
-        "name": "OneIndia Tamil",
-        "url": "https://tamil.oneindia.com/rss/tamil-news-feed.xml"
+        "name": "Times of India - Coimbatore",
+        "url": "https://timesofindia.indiatimes.com/rss/2647163.cms"
     },
     {
-        "name": "Dinamalar",
+        "name": "The Hindu - Coimbatore",
+        "url": "https://www.thehindu.com/news/cities/Coimbatore/feeder/default.rss"
+    },
+    {
+        "name": "Dinamalar - Tamil Nadu",
         "url": "https://www.dinamalar.com/rss/news_rss.asp"
-    },
-    {
-        "name": "Times of India India",
-        "url": "https://timesofindia.indiatimes.com/rss/853121"
     },
 ]
 
+# Keywords to confirm Coimbatore relevance
+COIMBATORE_KEYWORDS = [
+    "coimbatore", "kovai", "கோயம்புத்தூர்", "கோவை",
+    "tirupur", "pollachi", "mettupalayam", "ooty", "nilgiris",
+    "erode", "salem", "cbepmc", "ukkadam"
+]
+
+def is_coimbatore_related(title, description=""):
+    """Check if the article is about Coimbatore or nearby region"""
+    text = (title + " " + description).lower()
+    return any(kw.lower() in text for kw in COIMBATORE_KEYWORDS)
+
+def clean_html(text):
+    """Strip HTML tags and clean whitespace"""
+    text = re.sub(r'<[^>]+>', '', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text[:300]
+
 def fetch_rss_feed(feed):
-    """Fetch and parse a single RSS feed"""
+    """Fetch and parse a single RSS feed, filter for Coimbatore content"""
     topics = []
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (compatible; NewsBot/1.0)"
-        }
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; CoimbatoreNewsBot/1.0)"}
         resp = requests.get(feed["url"], headers=headers, timeout=15)
         resp.raise_for_status()
-
         root = ET.fromstring(resp.content)
         items = root.findall(".//item")
 
-        for item in items[:5]:
+        for item in items[:20]:  # scan more items to find Coimbatore ones
             title = item.findtext("title", "").strip()
             desc = item.findtext("description", "").strip()
             link = item.findtext("link", "").strip()
 
-            if title and len(title) > 10:
-                # Clean HTML from description
-                import re
-                desc = re.sub(r'<[^>]+>', '', desc)[:300]
+            if not title or len(title) < 10:
+                continue
+
+            desc_clean = clean_html(desc)
+
+            # For Google News feeds, accept all (already filtered by query)
+            # For other feeds, check Coimbatore relevance
+            if "google.com/rss/search" in feed["url"] or is_coimbatore_related(title, desc_clean):
                 topics.append({
                     "title": title,
-                    "description": desc,
+                    "description": desc_clean,
                     "source": feed["name"],
                     "url": link
                 })
 
-        print(f"  ✅ {feed['name']}: Found {len(topics)} topics")
+            if len(topics) >= 5:
+                break
+
+        print(f"  ✅ {feed['name']}: Found {len(topics)} Coimbatore topics")
+
     except Exception as e:
-        print(f"  ⚠️  {feed['name']}: {e}")
+        print(f"  ⚠️ {feed['name']}: {e}")
 
     return topics
 
 def get_fallback_topics():
-    """Hardcoded trending topics as last resort"""
-    print("  Using fallback trending topics...")
+    """Hardcoded Coimbatore fallback topics"""
+    print("  Using Coimbatore fallback topics...")
     return [
         {
-            "title": "இந்தியாவில் பொருளாதார வளர்ச்சி - புதிய அறிவிப்பு",
-            "description": "India economy growth new announcement affecting common people",
+            "title": "Coimbatore Smart City Project New Infrastructure Update",
+            "description": "Coimbatore Smart City Mission latest infrastructure development and road improvement projects announced",
             "source": "Fallback",
             "url": ""
         },
         {
-            "title": "தமிழகத்தில் வானிலை மாற்றம் - எச்சரிக்கை",
-            "description": "Tamil Nadu weather change warning issued by meteorological department",
+            "title": "Coimbatore Weather Alert - IMD Issues Warning",
+            "description": "India Meteorological Department issues weather alert for Coimbatore and nearby districts",
             "source": "Fallback",
             "url": ""
         },
         {
-            "title": "பெட்ரோல் டீசல் விலை இன்று - அதிர்ச்சி தகவல்",
-            "description": "Petrol diesel price today in Tamil Nadu latest update",
+            "title": "Coimbatore Textile Industry Boom - New Export Records",
+            "description": "Coimbatore textile and knitwear industry achieves new export milestone boosting local economy",
             "source": "Fallback",
             "url": ""
         },
         {
-            "title": "கிரிக்கெட் போட்டியில் இந்தியா அபார வெற்றி",
-            "description": "India cricket team wins important match latest sports news",
+            "title": "Coimbatore Traffic Regulation - New One-Way System Announced",
+            "description": "Coimbatore city police announce new traffic management rules to ease congestion in key areas",
             "source": "Fallback",
             "url": ""
         },
         {
-            "title": "தொழில்நுட்பம் - செயற்கை நுண்ணறிவு புதிய திருப்பம்",
-            "description": "Artificial intelligence technology new development affecting India",
+            "title": "PSG College Coimbatore Achieves National Ranking",
+            "description": "Coimbatore educational institutions secure top spots in national rankings for academic excellence",
             "source": "Fallback",
             "url": ""
         }
     ]
 
 def main():
-    print("🔍 Finding Trending Topics for Tamil News Channel...")
+    print("🔍 Finding Trending Coimbatore News Topics...")
     print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
 
     os.makedirs(os.path.dirname(TOPICS_FILE), exist_ok=True)
 
     all_topics = []
 
-    # Try each RSS feed
-    print("📡 Fetching from RSS feeds...")
+    print("📡 Fetching from RSS feeds (Coimbatore filter active)...")
     for feed in RSS_FEEDS:
         topics = fetch_rss_feed(feed)
-        all_topics.extend(topics)
+        # Deduplicate by title
+        existing_titles = {t["title"].lower() for t in all_topics}
+        for t in topics:
+            if t["title"].lower() not in existing_titles:
+                all_topics.append(t)
+                existing_titles.add(t["title"].lower())
         if len(all_topics) >= 10:
             break
 
-    # Use fallback if nothing found
     if len(all_topics) == 0:
-        print("\n⚠️  RSS feeds failed. Using fallback topics...")
+        print("\n⚠️ RSS feeds failed. Using fallback topics...")
         all_topics = get_fallback_topics()
 
     # Take top 5
     top_topics = all_topics[:5]
 
-    # Save to file
     output = {
         "date": datetime.now().strftime("%Y-%m-%d"),
         "fetched_at": datetime.now().strftime("%H:%M"),
+        "region": "Coimbatore",
         "total_found": len(all_topics),
         "topics": top_topics
     }
@@ -143,9 +171,10 @@ def main():
     with open(TOPICS_FILE, "w", encoding="utf-8") as f:
         json.dump(output, f, ensure_ascii=False, indent=2)
 
-    print(f"\n✅ Top {len(top_topics)} Topics Saved:")
+    print(f"\n✅ Top {len(top_topics)} Coimbatore Topics Saved:")
     for i, t in enumerate(top_topics, 1):
         print(f"  {i}. [{t['source']}] {t['title'][:60]}")
+
     print(f"\n📁 Saved to: {TOPICS_FILE}")
 
 if __name__ == "__main__":
