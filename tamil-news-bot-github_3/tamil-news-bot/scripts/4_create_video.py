@@ -11,7 +11,7 @@ STEP 4: Tamil News Video Creator (v18)
 - Skip videos with audio < 10s (refused scripts)
 """
 
-import json, os, sys, re, subprocess, glob, tempfile, numpy as np, requests
+import json, os, sys, re, subprocess, glob, tempfile, random, numpy as np, requests
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 
@@ -232,6 +232,13 @@ def resize_crop_frame(frame: np.ndarray) -> np.ndarray:
 # Build segment schedule from clip list
 # ===========================================================================
 def prepare_broll_segments(video_paths: list, total_duration: float):
+    """
+    v4 fix: force a hard cut to a DIFFERENT clip every BROLL_CUT_EVERY
+    seconds, cycling round-robin through every downloaded clip before
+    any repeat. The old version only switched clips once the current
+    one ran out -- since Pexels clips are often 15-30s long, a single
+    clip could cover an entire 20-30s video even when 8-9 were downloaded.
+    """
     segments = []
     clip_objects = []
 
@@ -245,21 +252,29 @@ def prepare_broll_segments(video_paths: list, total_duration: float):
     if not clip_objects:
         return [], []
 
-    t         = 0.0
-    clip_idx  = 0
-    clip_pos  = 0.0   # position within current clip
+    n_clips    = len(clip_objects)
+    n_segments = max(1, int(-(-total_duration // BROLL_CUT_EVERY)))  # ceil
 
-    while t < total_duration:
+    # Build a rotation order that uses every available clip once per
+    # "lap" before any repeat, reshuffling each lap so repeats never
+    # land back-to-back.
+    order = []
+    while len(order) < n_segments:
+        lap = list(range(n_clips))
+        random.shuffle(lap)
+        order.extend(lap)
+    order = order[:n_segments]
+
+    t = 0.0
+    for seg_i in range(n_segments):
         seg_end = min(t + BROLL_CUT_EVERY, total_duration)
         seg_dur = seg_end - t
+        clip    = clip_objects[order[seg_i]]
 
-        clip = clip_objects[clip_idx % len(clip_objects)]
-
-        # If not enough left in this clip, move to next
-        if clip.duration - clip_pos < seg_dur:
-            clip_idx += 1
-            clip_pos  = 0.0
-            clip = clip_objects[clip_idx % len(clip_objects)]
+        # Random start point inside the clip so repeats of the same
+        # clip (when n_clips < n_segments) don't show identical footage.
+        max_start = max(0.0, clip.duration - seg_dur - 0.1)
+        clip_pos  = random.uniform(0, max_start) if max_start > 0 else 0.0
 
         segments.append({
             "clip":     clip,
@@ -267,15 +282,9 @@ def prepare_broll_segments(video_paths: list, total_duration: float):
             "start_t":  t,
             "end_t":    seg_end,
         })
-
-        clip_pos += seg_dur
-        if clip_pos >= clip.duration - 0.2:
-            clip_idx += 1
-            clip_pos  = 0.0
-
         t = seg_end
 
-    print(f"  [BRoll] {len(segments)} segments × {BROLL_CUT_EVERY}s from {len(clip_objects)} clips → {total_duration:.1f}s")
+    print(f"  [BRoll] {len(segments)} segments × {BROLL_CUT_EVERY}s cycling through {n_clips} clips → {total_duration:.1f}s")
     return segments, clip_objects
 
 

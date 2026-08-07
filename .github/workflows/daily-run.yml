@@ -31,7 +31,7 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install openai requests feedparser beautifulsoup4
-          pip install gTTS pydub moviepy==1.0.3
+          pip install gTTS edge-tts pydub moviepy==1.0.3
           pip install Pillow numpy scipy
           pip install opencv-python-headless
           pip install librosa==0.10.1 numba==0.58.1

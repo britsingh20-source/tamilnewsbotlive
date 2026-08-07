@@ -32,7 +32,7 @@ Download Python 3.9+ from https://python.org/downloads
 
 ### Step 2: Install Required Libraries
 ```bash
-pip install requests gtts moviepy anthropic
+pip install requests gtts edge-tts moviepy anthropic
 ```
 
 ### Step 3: Get Free API Keys

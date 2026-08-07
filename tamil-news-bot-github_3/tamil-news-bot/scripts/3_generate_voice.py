@@ -1,10 +1,18 @@
 """
 STEP 3: Auto-Generate Tamil Voiceover (FREE)
-- Uses Google Text-to-Speech (gTTS)
-- v3 fixes:
-  * slow=False  -- normal speaking speed (was slow=True, too sluggish)
-  * atempo=1.10 -- 10% faster than default for energetic news delivery
-  * volume=+6dB -- louder via ffmpeg volume filter
+- v4 fix: switched primary engine from gTTS to edge-tts (Microsoft neural
+  voices). gTTS is a flat, single-tone robotic engine with no real
+  prosody -- that was the "robotic voice" complaint. edge-tts uses the
+  same neural voices as Edge/Windows narrator (ta-IN-PallaviNeural /
+  ta-IN-ValluvarNeural), free, no API key, natural intonation and pacing.
+  gTTS is kept as an automatic fallback if edge-tts fails (e.g. network
+  block in a CI runner).
+- Speaking rate is now controlled by the TTS engine itself (rate="+8%")
+  instead of stretching the finished audio with ffmpeg atempo, which is
+  what made the old gTTS output sound sped-up/warped on top of already
+  being flat.
+- v3 fixes (still active):
+  * volume boost + EQ warmth via ffmpeg post-process
   * Strips "cannot fetch", "Tamil News", English error phrases before TTS
   * Minimum 20 char check before TTS call
 """
@@ -13,7 +21,12 @@ import json
 import os
 import re
 import subprocess
+import asyncio
 from datetime import datetime
+
+# Neural voice to use. Swap to "ta-IN-ValluvarNeural" for a male voice.
+EDGE_TTS_VOICE = "ta-IN-PallaviNeural"
+EDGE_TTS_RATE  = "+8%"   # energetic news pace, set by the engine (not ffmpeg)
 
 SCRIPTS_FILE = os.path.join(os.path.dirname(__file__), "../output/scripts.json")
 AUDIO_DIR    = os.path.join(os.path.dirname(__file__), "../output/audio")
@@ -87,13 +100,15 @@ def post_process_audio(input_path: str, output_path: str) -> str:
       - acompressor   : even out volume peaks
       - atempo=1.10   : 10% faster = energetic news delivery pace
     """
+    # atempo removed -- edge-tts's own "rate" param now controls pace
+    # with proper prosody. Re-stretching finished audio with atempo is
+    # what made the old voice sound artificially warped.
     filter_chain = (
-        "volume=10dB,"
+        "volume=6dB,"
     "equalizer=f=180:width_type=o:width=2:g=3,"
     "equalizer=f=3000:width_type=o:width=2:g=3,"
     "acompressor=threshold=0.089:ratio=4:attack=5:release=50,"
-    "alimiter=level_in=1:level_out=1:limit=0.95:attack=5:release=50,"
-    "atempo=1.10"
+    "alimiter=level_in=1:level_out=1:limit=0.95:attack=5:release=50"
 )
     cmd = [
         "ffmpeg", "-y", "-i", input_path,
@@ -159,8 +174,33 @@ def extract_spoken_text(script_text):
     return " ".join(spoken_parts)
 
 
+def generate_audio_edge_tts(text, output_path, voice=EDGE_TTS_VOICE, rate=EDGE_TTS_RATE):
+    """Generate audio using Microsoft edge-tts neural voice (primary engine)."""
+    try:
+        import edge_tts
+    except ImportError:
+        print("   Installing edge-tts...")
+        os.system("pip install edge-tts --break-system-packages -q")
+        try:
+            import edge_tts
+        except Exception as e:
+            print(f"   edge-tts install failed: {e}")
+            return False
+
+    async def _synthesize():
+        communicate = edge_tts.Communicate(text, voice=voice, rate=rate)
+        await communicate.save(output_path)
+
+    try:
+        asyncio.run(_synthesize())
+        return os.path.exists(output_path) and os.path.getsize(output_path) > 0
+    except Exception as e:
+        print(f"   edge-tts error: {e}")
+        return False
+
+
 def generate_audio_gtts(text, output_path, lang="ta"):
-    """Generate audio using gTTS. slow=False for natural news pace."""
+    """Fallback engine if edge-tts fails. Flatter/more robotic, but reliable."""
     try:
         from gtts import gTTS
         tts = gTTS(text=text, lang=lang, slow=False)  # normal speed
@@ -180,6 +220,15 @@ def generate_audio_gtts(text, output_path, lang="ta"):
     except Exception as e:
         print(f"   Audio generation error: {e}")
         return False
+
+
+def generate_audio(text, output_path, lang="ta"):
+    """Try edge-tts (natural) first, fall back to gTTS if it fails."""
+    if generate_audio_edge_tts(text, output_path):
+        print("   [Voice] edge-tts (neural) OK")
+        return True
+    print("   [Voice] edge-tts failed -- falling back to gTTS")
+    return generate_audio_gtts(text, output_path, lang=lang)
 
 
 def main():
@@ -226,7 +275,7 @@ def main():
         raw_path   = os.path.join(AUDIO_DIR, f"audio_{i}_{timestamp}_raw.mp3")
         final_path = os.path.join(AUDIO_DIR, f"audio_{i}_{timestamp}.mp3")
 
-        success = generate_audio_gtts(spoken_text, raw_path)
+        success = generate_audio(spoken_text, raw_path)
 
         if success:
             duration = get_audio_duration(raw_path)
