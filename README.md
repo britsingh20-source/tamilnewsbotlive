@@ -2,9 +2,9 @@
 
 ## Olive Tree Interior CRM
 
-[CRM source code](olive-interior-crm/) · [Open live CRM](https://olive-interior-crm.britsingh20.chatgpt.site)
+[Open live CRM](https://olive-interior-crm.britsingh20.workers.dev) · [CRM source code](olive-interior-crm/)
 
-A solo conversion follow-up CRM with customer contacts, voice-to-text notes, site visits, quotations, 3D drawing follow-ups and confirmation tracking. Customer records and runtime secrets are stored in the private application environment and are not part of this repository. GitHub stores the source; the working CRM is hosted at the link above.
+A solo interior conversion follow-up CRM with customer contacts, voice-to-text notes, site visits, quotations and 3D drawing follow-ups. Hosted directly on Cloudflare Workers; sign in using the owner email verification code. Customer data and secrets remain in the private runtime database and are not committed here. See the CRM README for deployment instructions and the GitHub integration status.
 
 ## Tamil news bot
 

@@ -43,3 +43,6 @@ yarn-error.log*
 
 # OS metadata
 .DS_Store
+
+# Standalone Cloudflare build output
+.standalone-build/

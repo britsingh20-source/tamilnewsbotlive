@@ -13,11 +13,17 @@ A responsive solo interior business CRM built with React, Vinext and Cloudflare 
 
 Records are stored server-side and scoped to the signed-in user. The deployment is owner-private. No customer records or credentials are stored in this source repository.
 
-## Develop
-Install dependencies using the Sites helper, then `npm run dev`. Authentication is provided by the Sites platform; local testing requires an isolated mock identity or trusted request headers. Never deploy a development authentication bypass.
+## Live standalone CRM
+https://olive-interior-crm.britsingh20.workers.dev
 
-## Deploy
-`.openai/hosting.json` declares the Sites project and D1 binding. Publish using the Sites source workflow and build helper. Database schema is in `db/schema.ts`; tracked Drizzle migrations are applied by Sites during deployment.
+Hosted directly on Cloudflare Workers with a dedicated D1 database. Cloudflare Access restricts the entire Worker to the owner's verified email using a one-time email code. The Worker also checks the validated Access identity before returning the application or customer data. Customer records and secrets are never committed to GitHub.
+
+## Develop and deploy
+Install dependencies with `npm install`. Run `npm run build:standalone`, then `npm run deploy:standalone` after authenticating Wrangler with the Cloudflare account. The standalone frontend and API are in `standalone/`; `standalone/wrangler.jsonc` declares the existing Worker and database. Keep its Worker-level Access application enabled. The build embeds static frontend assets in the Worker module. `npm run dev` remains the original Sites development workflow.
+
+The original Sites deployment remains available as a backup. Its `.openai/hosting.json` and trusted Sites authentication apply only to that deployment. The standalone database contains the migrated customer records; later changes are independent between the two deployments.
+
+Automatic GitHub deployments require connecting this repository through Cloudflare's GitHub integration. The integration currently needs reconnection in the Cloudflare dashboard; source commits alone do not deploy this Worker.
 
 ## Limits
 WhatsApp opens a prepared message for manual sending. Follow-ups are shown inside the CRM, with no background push notifications. Quotes have no automatic GST calculation. File uploads, automatic Meta lead ingestion, accounting integrations, and multiple employee roles are not included in this initial release. JSON export is a backup download; restore import is not yet implemented.

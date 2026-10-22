@@ -1,0 +1,14 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "olive-interior-crm",
+  "account_id": "c6d0fcd62c11219b8a4516cfd3d90658",
+  "main": "../.standalone-build/worker/index.js",
+  "no_bundle": true,
+  "compatibility_date": "2026-10-22",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "observability": {"enabled":true},
+  "vars": {"OWNER_EMAIL":"britsingh20@gmail.com"},
+  "d1_databases": [{"binding":"DB","database_name":"olive-interior-crm","database_id":"cd21dfac-37e5-467b-a355-b6e05d4f13cd","migrations_dir":"../drizzle"}]
+}
