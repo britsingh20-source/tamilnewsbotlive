@@ -1,0 +1,1 @@
+CREATE TABLE IF NOT EXISTS crm_daily_plans(day TEXT PRIMARY KEY, data TEXT NOT NULL);

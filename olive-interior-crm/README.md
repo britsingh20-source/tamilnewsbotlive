@@ -52,3 +52,12 @@ Clicking a customer name or number opens that customer's voice entry directly. S
 
 ### iPhone speech recovery
 Embedded iPhone browsers default to keyboard dictation guidance, because exposing the browser speech API does not guarantee that its speech service can capture audio. Speech failures now show specific guidance and expose keyboard dictation. The keyboard control focuses the selected customer's text box; the user must tap the iPhone keyboard microphone. No code can launch that operating-system dictation action on the user's behalf. Browser speech remains available as an explicit retry. Voice-note screens no longer reserve the unrelated bottom scheduling footer; Save note remains accessible in the scrolling form.
+
+## Daily director and client advisor
+The standalone Worker prepares exactly ten assignments at 6:00 AM Asia/Kolkata (cron `30 0 * * *` UTC), or on the first request if a plan is absent. Up to eight due client actions are ranked by appointments, overdue dates, delivery stage, recorded interest and saved priority; remaining capacity is filled with marketing and business preparation. Future callback dates and closed or archived clients are excluded. Completion notes and status persist in D1 separately from customer records. Reassessing unfinished work retains completed assignments. Recording task completion does not imply a call, stage transition or conversion. Log the actual customer response to update the sales schedule.
+
+Client advice is deterministic and explainable: recorded outcomes take precedence, selected English note phrases are tentative signals, and missing information remains unknown. It provides a next action, timing, question, evidence and missing qualification facts. This version does not use a language model, analyze audio emotion, connect ad analytics, publish ads, send messages, or send push notifications. Marketing assignments are manual briefs. Natural-language dates in notes are not automatically converted to callbacks; enter the agreed callback date in Log a conversation.
+
+Apply `standalone/migrations/0002_daily_plans.sql` before deployment. The scheduled handler and authenticated `/api/plan` share the same plan creation function; the daily plan is protected by the existing password session.
+
+Run advisor regression checks by bundling `tests/advisor.test.ts` with the existing Vite SSR build API and running its output; the tests cover ten unique assignments, future callbacks, missing sentiment, budget concerns, delivery priorities and closed client exclusion.

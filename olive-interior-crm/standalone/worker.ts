@@ -3,10 +3,12 @@ import {normalize,indiaToday} from '../lib/conversion';
 import {phoneKey} from '../lib/contacts';
 import {customerSchema} from './customer-schema';
 import {auth} from './auth';
+import {dailyPlan,plannerApi} from './planner';
 const owner='owner';
 const headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'same-origin','Permissions-Policy':'microphone=(self)'};
 function json(body:unknown,status=200){return Response.json(body,{status,headers})}
 export default {
+ async scheduled(_event:ScheduledController,env:StandaloneEnv,_ctx:ExecutionContext){await dailyPlan(env);},
  async fetch(request:Request,env:StandaloneEnv,_ctx:ExecutionContext):Promise<Response>{
   const url=new URL(request.url);
   try{
@@ -15,6 +17,7 @@ export default {
    if(url.pathname.startsWith('/api/')){
     if(request.method==='POST'&&request.headers.get('origin')!==url.origin)return json({error:'Invalid origin'},403);
     if(request.method==='POST'&&Number(request.headers.get('content-length')||0)>120000)return json({error:'Request too large'},413);
+    if(url.pathname==='/api/plan')return plannerApi(request,env);
     if(url.pathname==='/api/records'&&request.method==='GET'){
      const result=await env.DB.prepare('SELECT data,updated FROM crm_records WHERE owner=?').bind(owner).all<{data:string;updated:string}>();return json(result.results.map(r=>normalize(JSON.parse(r.data),r.updated.slice(0,10))));
     }

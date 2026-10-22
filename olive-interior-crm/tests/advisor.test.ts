@@ -1,0 +1,15 @@
+import assert from 'node:assert/strict';
+import {analyzeClient,createPlan} from '../lib/advisor';
+import {normalize,Customer,followUp} from '../lib/conversion';
+const day='2026-10-22';
+const contact=(id:string):Customer=>normalize({id,name:'',phone:'9000000000',area:'',service:'Home interior',source:'WhatsApp',stage:'Site visit',budget:0,followup:day,visit:'',notes:'',quote:[],payments:[],tasks:[],history:[]},day);
+const fresh=contact('new');assert.equal(analyzeClient(fresh,day).sentiment,'Not enough information');assert.equal(analyzeClient(fresh,day).missing.length,5);
+const future=followUp({...contact('later'),stage:'Follow-up'},'Call later','Customer is travelling','2026-10-30',day);
+assert.equal(analyzeClient(future,day).date,'2026-10-30');assert.ok(!createPlan([future],day).tasks.some(t=>t.clientId));
+const price=followUp({...contact('price'),stage:'Follow-up'},'Price concern','Needs lower budget','',day);assert.match(analyzeClient(price,day).action,/scope and material/);
+const blank=contact('blank');const urgent={...contact('urgent'),stage:'3D drawing'};const plan=createPlan([blank,urgent],day);assert.equal(plan.tasks.length,10);assert.equal(plan.tasks[0].clientId,'urgent');assert.equal(new Set(plan.tasks.map(t=>t.id)).size,10);
+for(const stage of ['Converted','Not proceeding'])assert.ok(!createPlan([{...contact(stage),stage}],day).tasks.some(t=>t.clientId));
+assert.ok(!createPlan([{...contact('archive'),archived:true}],day).tasks.some(t=>t.clientId));
+const busy=createPlan(Array.from({length:35},(_,i)=>contact('id'+i)),day);assert.equal(busy.tasks.filter(t=>t.clientId).length,8);assert.equal(busy.tasks.filter(t=>t.category==='Marketing').length,2);
+const badDates={...contact('bad'),history:[{date:'invalid',text:'Interested'}]};assert.equal(analyzeClient(badDates,day).sentiment,'Not enough information');
+console.log('Advisor checks passed: unknown sentiment, callbacks, budget objections, delivery priority, closed and archived exclusion, 10 unique tasks and marketing capacity.');
