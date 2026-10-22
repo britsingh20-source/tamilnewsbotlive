@@ -16,10 +16,10 @@ Records are stored server-side and scoped to the signed-in user. The deployment 
 ## Live standalone CRM
 https://olive-interior-crm.britsingh20.workers.dev
 
-Hosted directly on Cloudflare Workers with a dedicated D1 database. Cloudflare Access restricts the entire Worker to the owner's verified email using a one-time email code. The Worker also checks the validated Access identity before returning the application or customer data. Customer records and secrets are never committed to GitHub.
+Hosted directly on Cloudflare Workers with a dedicated D1 database. A server-checked password unlocks the CRM. Sessions use secure HttpOnly cookies and expire after 90 days. Password hashes stay in the Worker secret CRM_PASSWORD_HASH; passwords are never included in source. Failed login attempts are limited per IP address. Customer records and secrets are never committed to GitHub.
 
 ## Develop and deploy
-Install dependencies with `npm install`. Run `npm run build:standalone`, then `npm run deploy:standalone` after authenticating Wrangler with the Cloudflare account. The standalone frontend and API are in `standalone/`; `standalone/wrangler.jsonc` declares the existing Worker and database. Keep its Worker-level Access application enabled. The build embeds static frontend assets in the Worker module. `npm run dev` remains the original Sites development workflow.
+Install dependencies with `npm install`. Run `npm run build:standalone`, then `npm run deploy:standalone` after authenticating Wrangler with the Cloudflare account. The standalone frontend and API are in `standalone/`; `standalone/wrangler.jsonc` declares the existing Worker and database. The standalone Worker implements its own password login; no email-code Access application is required. Apply standalone/migrations/0001_auth.sql to the existing D1 database before deploying this version. Configure CRM_PASSWORD_HASH as a secret using a random salt and PBKDF2-SHA256 with 100,000 iterations, encoded as salt:hexhash. Never commit its value. The build embeds static frontend assets in the Worker module. `npm run dev` remains the original Sites development workflow.
 
 The original Sites deployment remains available as a backup. Its `.openai/hosting.json` and trusted Sites authentication apply only to that deployment. The standalone database contains the migrated customer records; later changes are independent between the two deployments.
 

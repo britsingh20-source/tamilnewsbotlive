@@ -2,18 +2,16 @@ import assets from '../.standalone-build/assets.json';
 import {normalize,indiaToday} from '../lib/conversion';
 import {phoneKey} from '../lib/contacts';
 import {customerSchema} from './customer-schema';
-type AccessContext=ExecutionContext & {access?:{getIdentity:()=>Promise<{email?:string}|null>}};
+import {auth} from './auth';
 const owner='owner';
 const headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'same-origin','Permissions-Policy':'microphone=(self)'};
 function json(body:unknown,status=200){return Response.json(body,{status,headers})}
 export default {
- async fetch(request:Request,env:StandaloneEnv,ctx:AccessContext):Promise<Response>{
+ async fetch(request:Request,env:StandaloneEnv,_ctx:ExecutionContext):Promise<Response>{
   const url=new URL(request.url);
   try{
    if(url.pathname==='/health')return json({app:'Olive Tree Interior CRM',hosting:'Cloudflare Workers',protected:true});
-   if(!ctx.access)return json({error:'Please sign in through the CRM’s secure email login.'},401);
-   const identity=await ctx.access.getIdentity();
-   if(!identity?.email||identity.email.toLowerCase()!==env.OWNER_EMAIL.toLowerCase())return json({error:'This CRM is private.'},403);
+   const login=await auth(request,env);if(login)return login;
    if(url.pathname.startsWith('/api/')){
     if(request.method==='POST'&&request.headers.get('origin')!==url.origin)return json({error:'Invalid origin'},403);
     if(request.method==='POST'&&Number(request.headers.get('content-length')||0)>120000)return json({error:'Request too large'},413);

@@ -2,4 +2,5 @@
 interface StandaloneEnv {
   DB: D1Database;
   OWNER_EMAIL: string;
+  CRM_PASSWORD_HASH: string;
 }
